@@ -109,6 +109,7 @@ export class Daemon {
       setState(db, 'last_notified_stop_fill', String(max), clock);
     }
 
+    await this.broker.start?.();
     await this.opts.feed.start((e) => this.onMarketEvent(e));
     await this.opts.feed.subscribe?.(this.scheduler.watchSymbols());
     this.server = await serve(this.opts.ipcPath, (method, params) => this.handle(method, params));
@@ -242,6 +243,12 @@ export class Daemon {
         const id = orderIdParam(p);
         const order = await this.broker.cancel(id);
         return { order, fills: listFills(this.opts.db, { orderId: id }) };
+      }
+      case 'broker_holdings': {
+        if (!this.broker.holdings) {
+          throw new CtradeError('BROKER_UNSUPPORTED', `送單轉接層 ${this.broker.name} 不提供券商庫存`, ExitCode.BROKER_ERROR);
+        }
+        return this.broker.holdings();
       }
       case 'candles': {
         if (!this.opts.feed.candles) {

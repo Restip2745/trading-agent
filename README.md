@@ -2,7 +2,7 @@
 
 讓 Claude 透過玉山證券 API，在使用者撥給它的一筆**獨立資金**內自動交易台股。Claude 的資金與持倉全部記錄在本地 SQLite 影子帳本，與使用者其餘資產完全分開；所有元件都在使用者自己的電腦上執行，憑證不離開本機。
 
-> **專案狀態：第 4 階段程式完成（待驗收），第 3 階段待接券商。** 帳本核心、模擬撮合、daemon 與 IPC、下單與刪單、觸發排程、硬停損停利、叫醒 Claude、每日重設／停機檢查／對帳快照備份、兩個 skill 與提示範本都已完成，146 個自動化測試通過。尚缺玉山券商與行情轉接層（等 SDK 放進 `vendor/`）與第一版交易策略。券商 API 查證結果見 [`doc/broker-api-notes.md`](doc/broker-api-notes.md)。
+> **專案狀態：第 3、4 階段程式完成，待以真實金鑰驗收。** 帳本核心、模擬撮合、daemon 與 IPC、下單與刪單、觸發排程、硬停損停利、叫醒 Claude、每日重設／停機檢查／對帳快照備份、兩個 skill 與提示範本、玉山行情與券商轉接層都已完成，173 個自動化測試通過。尚缺以真實金鑰的連線驗收、第一版交易策略與 Web UI。券商 API 查證結果見 [`doc/broker-api-notes.md`](doc/broker-api-notes.md)。
 >
 > 目前的 `trading-strategy` skill 是**佔位版 v0：不開新倉**，只維護既有持倉的停損。第一版策略要依規格第 15 節撰寫後才會開始交易。
 >
@@ -72,6 +72,40 @@ npm run build
 ```bash
 npm link
 ```
+
+## 玉山 API 金鑰
+
+金鑰存放在 Windows 認證管理員，不寫進任何檔案。從玉山金鑰網站下載的設定檔（`.ini`）與 `.p12` 憑證請放在**專案目錄以外**，匯入時會以隱藏輸入詢問證券登入密碼與憑證密碼：
+
+```bash
+npm run ctrade-admin -- secrets import esun-marketdata --ini C:/secure/esun/config.marketdata.ini --cert C:/secure/esun/cert.p12
+```
+
+```bash
+npm run ctrade-admin -- secrets import esun-live --ini C:/secure/esun/config.ini --cert C:/secure/esun/cert.p12
+```
+
+三組金鑰的用途：
+
+| profile | 用途 | 需要嗎 |
+| --- | --- | --- |
+| `esun-live` | 正式環境交易金鑰：live 模式送單 | live 模式必要 |
+| `esun-marketdata` | 行情金鑰：paper 與 live 都用真實行情 | 選用，沒有時改用 `esun-live` 接行情 |
+| `esun-sim` | 玉山模擬環境金鑰：只用來測試下單串接 | 選用 |
+
+**paper 模式不需要 `esun-sim`。** paper 模式用真實行情加本地模擬撮合，委託只寫進 `data/paper.db`，不會送到任何券商環境。玉山的模擬金鑰是連線測試用，不適合拿來做模擬交易。行情 SDK 只能查行情、無法下單，所以 paper 模式以正式環境金鑰接行情也不會送出委託。
+
+匯入後以唯讀查詢確認連線（第 1 階段驗收）：
+
+```bash
+npm run ctrade-admin -- broker check
+```
+
+```bash
+npm run ctrade-admin -- market check --symbol 0050
+```
+
+daemon 啟動時自動接玉山即時行情（`esun-marketdata`，沒有時用 `esun-live`）；只有 live 模式會以 `esun-live` 送單。
 
 ## 為什麼需要影子帳本
 
@@ -273,7 +307,7 @@ Claude 每次決策結束前可用 `ctrade trigger set` 調整下一輪的觸發
 
 - [ ] **1. 確認券商 API**：查證規格第 20 節的待確認事項，寫出 `doc/broker-api-notes.md`，唯讀查詢實際呼叫成功。（筆記已完成；實際呼叫需先下載 Node.js SDK 並設定金鑰）
 - [x] **2. 帳本核心**：schema、migration、推導 view、`ctrade-admin` 資金與持股操作、風控函式庫，單元測試全數通過。
-- [ ] **3. 行情與模擬撮合**：行情接入、模擬撮合引擎、`ctrade` 全部指令，以錄製行情重播驗證。（模擬撮合、daemon IPC、下單與刪單已完成；玉山行情與券商轉接層、`market`／`news` 等盤外資訊指令待做）
+- [ ] **3. 行情與模擬撮合**：行情接入、模擬撮合引擎、`ctrade` 全部指令，以錄製行情重播驗證。（模擬撮合、daemon IPC、下單與刪單、玉山行情與券商轉接層已完成；待以真實金鑰驗證、在玉山模擬環境驗證下單與刪單；`market`／`news` 等盤外資訊指令待做）
 - [ ] **4. Daemon 與 Claude Code 整合**：觸發、硬停損停利、兩個 skill、提示範本、權限設定，paper 模式完整跑一個交易日。（程式與測試已完成；驗收需要真實行情與第一版策略，在 paper 模式實際跑一個交易日）
 - [ ] **5. Web UI**：所有頁面與操作。
 - [ ] **6. 復盤流程與模擬運行**：連續 10 個交易日無對帳錯誤，至少完成一次策略提案審核。

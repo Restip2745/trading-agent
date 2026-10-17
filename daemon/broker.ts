@@ -12,7 +12,7 @@ import { type Clock, toTwIso } from '../core/time.js';
 
 /**
  * 送單轉接層。paper 與 live 只差在這一層（規格第 3 節）：
- * PaperBroker 交給本地模擬撮合，EsunBroker（待 SDK 放進 vendor/ 後實作）送到玉山。
+ * PaperBroker 交給本地模擬撮合，EsunBroker（daemon/esun/broker.ts）送到玉山。
  *
  * 呼叫端（ctrade）已在帳本寫入 pending_submit 並完成圈存，轉接層只負責送出與更新狀態。
  */
@@ -20,8 +20,12 @@ export interface BrokerAdapter {
   readonly name: string;
   submit(orderId: number): Promise<OrderRow>;
   cancel(orderId: number): Promise<OrderRow>;
-  /** 定期維護：處理卡住的委託。 */
+  /** 定期維護：處理卡住的委託、同步券商狀態。 */
   sweep(): void;
+  /** 啟動程序：登入、同步、快速對帳（規格第 17 節）。 */
+  start?(): Promise<void>;
+  /** 券商實際庫存（live 模式轉入持股前檢查用）。 */
+  holdings?(): Promise<{ symbol: string; qty: number }[]>;
 }
 
 export class PaperBroker implements BrokerAdapter {

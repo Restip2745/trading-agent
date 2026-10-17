@@ -85,7 +85,7 @@ live 與 paper 使用兩個獨立的 SQLite 檔，schema 完全相同。不在�
 - 每次 CLI 輸出的第一個欄位標明模式，例如 JSON 的 `"mode": "PAPER"`，文字輸出開頭加 `[PAPER]` 或 `[LIVE]`。
 - 切換到 live 必須由使用者手動修改設定，並在 Web UI 上顯示明顯的模式標示。
 
-**兩種模式只有一個差別**：送單那一步。paper 模式由本地模擬撮合引擎產生成交（見第 7 節），其餘流程完全相同，包括觸發、決策、委託、帳本、復盤、Dashboard。行情在兩種模式下都使用真實行情。玉山另有官方的交易模擬環境，只在開發階段用來驗證下單串接，不作為 paper 模式的撮合來源，因為券商模擬環境的成交不一定貼近真實市場。
+**兩種模式只有一個差別**：送單那一步。paper 模式由本地模擬撮合引擎產生成交（見第 7 節），其餘流程完全相同，包括觸發、決策、委託、帳本、復盤、Dashboard。行情在兩種模式下都使用真實行情。玉山另有官方的交易模擬環境，只在開發階段用來驗證下單串接，不作為 paper 模式的撮合來源，因為券商模擬環境的成交不一定貼近真實市場（模擬環境也不產生成交回報）。paper 模式因此不需要玉山的模擬金鑰；行情以正式環境的金鑰取得（行情 SDK 只能查詢、無法下單）。
 
 ## 4. SQLite 資料庫 schema
 
@@ -776,7 +776,7 @@ Claude 盤中不能上網，所有決策資料都由 `ctrade` 提供。daemon �
 
 ### 技術選擇建議
 
-- **CLI、daemon、核心套件**：Node.js（TypeScript），使用玉山官方的 Node.js SDK（交易 `@esun/trade`，行情 `esun-marketdata.tgz`）。專案以 `.nvmrc` 鎖定 Node.js 24（`better-sqlite3` 需要 22 以上）。Node.js SDK 可直接傳入密碼與憑證密碼，因此機密全部由 keyring 讀出後傳入，不需明文設定檔。
+- **CLI、daemon、核心套件**：Node.js（TypeScript），使用玉山官方的 Node.js SDK（交易 `@esun/trade`，行情 `@esun/marketdata`，2.2.0）。機密以 SDK 本身依賴的 `keytar` 存放在 Windows 認證管理員。專案以 `.nvmrc` 鎖定 Node.js 24（`better-sqlite3` 需要 22 以上）。Node.js SDK 可直接傳入密碼與憑證密碼，因此機密全部由 keyring 讀出後傳入，不需明文設定檔。
 - **SDK 安裝**：SDK 不在公開套件庫，要從玉山官網下載 tgz 檔放在 `vendor/`，在 package.json 以本機檔案路徑引用。更新 SDK 時替換檔案並記錄版本。
 - **SQLite**：`better-sqlite3`，同步 API，交易寫法直接。
 - **Web UI**：Node.js 後端（例如 Fastify）提供 API，前端 Vue 3。後端與 CLI 共用核心套件與型別定義。

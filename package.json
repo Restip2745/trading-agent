@@ -22,6 +22,8 @@
     "daemon": "tsx daemon/main.ts"
   },
   "dependencies": {
+    "@esun/marketdata": "file:vendor/esun-marketdata-2.2.0.tgz",
+    "@esun/trade": "file:vendor/esun-trade-2.2.0.tgz",
     "better-sqlite3": "^13.0.3",
     "commander": "^15.0.0",
     "smol-toml": "^1.9.1"

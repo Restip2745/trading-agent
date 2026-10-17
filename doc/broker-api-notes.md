@@ -10,12 +10,32 @@
 
 | 項目 | 交易 SDK | 行情 SDK |
 | --- | --- | --- |
-| Node.js 套件 | `@esun/trade`（`esun-trade.tgz`） | `esun-marketdata.tgz`（套件名實作時從 tgz 的 package.json 確認） |
+| Node.js 套件 | `@esun/trade` 2.2.0（`vendor/esun-trade-2.2.0.tgz`） | `@esun/marketdata` 2.2.0（`vendor/esun-marketdata-2.2.0.tgz`） |
 | Python 套件 | `esun_trade` 2.2.0（.whl） | `esun_marketdata` 2.2.0（.whl） |
 | 取得方式 | 不在公開套件庫，從 [SDK 下載頁](https://www.esunsec.com.tw/trading-platforms/api-trading/docs/download/download-sdk/) 下載 | 同左 |
 | 版本注意 | < 2.2.0（舊名 `fugle_trade`）自 2026-01-01 起不支援 | < 2.2.0（舊名 `fugle_marketdata`）自 2025-09-01 起降為基本用戶權限 |
 
 **決定**：照規格使用 Node.js SDK。tgz 放 `vendor/`，以 `file:` 路徑引用。網路上 `fugle_*` 時期的舊範例不要照抄。
+
+### 從 SDK 原始碼確認的事實（2026-10-17）
+
+- 兩個 SDK 都內含 `@esun/trade-core`：napi-rs 原生模組，已預先編譯 Windows x64、macOS、Linux 版本，不需要編譯。SDK 本身沒有安裝腳本。
+- 依賴 `keytar`（原生，安裝時從 GitHub 下載預編譯檔）與 `inquirer`，模組載入時就會 require。
+- **同時提供 `password` 與 `certPass` 時，SDK 直接建立連線，不會跳出互動式詢問**；否則 `login()` 以 inquirer 詢問並存進 keytar。本系統一律從自己的 keyring 讀出後傳入。
+- 原生方法（登入、下單、查詢）是**同步**呼叫，執行期間會擋住 Node 事件迴圈；包裝成 Promise 只是介面一致。
+- 刪單是 `replaceQuantity(order, 0)`，必須傳入 `getOrders()` 回來的委託物件，所以刪單前要先查一次委託。
+- 委託查詢回傳 `orgQtyShare`、`matQtyShare`、`celQtyShare`（股），不論盤別都能直接用，不必自己換算張與股。
+- 主動回報經 `convertWsObject` 解碼後以 `kind`（ACK 委託、MAT 成交）分派。**回報的欄位格式文件沒有範例**，所以轉接層只把回報當成「提前同步」的訊號，成交以委託查詢的已成交股數與均價為準。
+- 行情 SDK 登入後以 `exchangeRealtimeToken()` 換取 SDK token，REST 帶 `X-SDK-TOKEN`、WebSocket 以 `{event: 'auth', data: {sdkToken}}` 認證。每次取用 `websocketClient` 都會建立新連線。
+- 行情 REST 底層是 `isomorphic-fetch`，4xx 以一般回應回傳（與 evalis 實測一致）。
+- `npm audit` 回報行情 SDK 依賴的 `query-string` → `decode-uri-component` 有中度弱點（解碼惡意格式輸入可能 DoS）。我們只送自己的股票代號，風險低，目前沒有修正版本。
+
+### 待正式環境驗證
+
+- 庫存的「目前持股」以 `昨餘額 qtyL + 今買成交 qtyBm − 今賣成交 qtySm + 調整 qtyC` 計算，需對照券商畫面確認。不符時啟動對帳會誤判暫停。
+- 賣出當日買進的部位時以 `trade = A`（現股當沖賣）送出。帳戶中同時有使用者的隔日庫存時，券商如何處理需確認。
+- WebSocket 整股成交與五檔的數量單位假設為「張」（乘以 ticker 的 boardLot 換成股），零股為「股」。
+- WebSocket 成交訊息的開盤、收盤集合競價標記假設為 `isOpen`、`isClose`。
 
 ## 登入與憑證
 
@@ -184,7 +204,7 @@
 
 ## 仍需使用者處理
 
-1. 從 SDK 下載頁下載 `esun-trade.tgz` 與 `esun-marketdata.tgz`，放進本專案的 `vendor/`。
-2. 申請行情金鑰（模擬金鑰沒有行情權限）。
+1. ~~從 SDK 下載頁下載 tgz 放進 `vendor/`~~（已完成）。
+2. 以 `ctrade-admin secrets import` 匯入金鑰（見 README），並以 `ctrade-admin broker check`、`ctrade-admin market check` 完成唯讀查詢驗收。
 3. 確認目前使用的對外 IP 已登記在正式與模擬的白名單。
 4. 模擬金鑰 evalis 筆記記載有效至 2026-09-25，**目前已過期**，進行模擬環境串接驗證前需重新申請。

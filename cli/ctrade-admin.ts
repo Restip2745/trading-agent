@@ -14,8 +14,13 @@ import { scalePeaksForFlow } from '../core/risk.js';
 import { type FeeScheduleInput, addFeeSchedule, getFeeSchedule, getRiskParams, setRiskParams } from '../core/settings.js';
 import { addHoliday, audit, getPause, getState, pause, resume, setState } from '../core/state.js';
 import { DailyJobs } from '../daemon/daily.js';
+import { EsunMarketDataApi, EsunTradeApi } from '../daemon/esun/api.js';
+import { SECRET_PROFILES, isSimulationUrl, keyringStore, mask, maskedCredentials, parseProfile, readEsunIni, requireCredentials, resolveMarketCredentials } from '../core/secrets.js';
+import { dirname, isAbsolute, relative, resolve } from 'node:path';
+import { promptHidden } from './prompt.js';
 import { isValidDate, twDate } from '../core/time.js';
-import { type Ctx, getCtx, initMode, loadQuotes, parseIntArg, parseNumberArg, parsePriceArg, parseSymbol, run } from './common.js';
+import { call } from '../core/ipc.js';
+import { type Ctx, daemonPath, getCtx, initMode, loadQuotes, parseIntArg, parseNumberArg, parsePriceArg, parseSymbol, run } from './common.js';
 import { presentFees, presentPosition } from './present.js';
 
 initMode();
@@ -23,11 +28,11 @@ initMode();
 const ACTOR = 'user';
 
 /** 執行管理操作並寫入稽核記錄；失敗也記錄。 */
-function admin<T>(command: string, args: unknown, fn: (ctx: Ctx) => T): Promise<void> {
-  return run(() => {
+function admin<T>(command: string, args: unknown, fn: (ctx: Ctx) => T | Promise<T>): Promise<void> {
+  return run(async () => {
     const ctx = getCtx();
     try {
-      const result = fn(ctx);
+      const result = await fn(ctx);
       audit(ctx.db, ACTOR, command, args, 'ok', ctx.clock);
       return result;
     } catch (e) {
@@ -88,15 +93,20 @@ program
   .option('--cost <價>', '每股成本；預設為前一交易日收盤價')
   .option('--note <text>', '備註')
   .action((symbol: string, opts: { qty: string; cost?: string; note?: string }) =>
-    admin('transfer-in', { symbol, ...opts }, (ctx) => {
+    admin('transfer-in', { symbol, ...opts }, async (ctx) => {
       const sym = parseSymbol(symbol);
+      const qty = parseIntArg('--qty', opts.qty);
+      // 報價用於預設成本與權益估值；daemon 未執行時 paper 模式仍可轉入（需指定 --cost）
+      try {
+        await loadQuotes(ctx, [sym, ...getPositions(ctx.db).map((p) => p.symbol)]);
+      } catch {
+        // 沒有報價時以平均成本估值
+      }
+      // 規格第 5 節：live 模式必須先向券商查詢實際持股，確認「使用者持股 − 已轉入股數」足夠
+      let brokerHeldQty: number | undefined;
       if (ctx.config.mode === 'live') {
-        // 規格第 5 節：live 模式必須先向券商查詢實際持股。券商連線由 daemon 提供（第 3 階段）。
-        throw new CtradeError(
-          'BROKER_UNAVAILABLE',
-          'live 模式轉入持股需要 daemon 向券商查詢實際持股，daemon 尚未實作',
-          ExitCode.BROKER_ERROR,
-        );
+        const holdings = await call<{ symbol: string; qty: number }[]>(daemonPath(ctx), 'broker_holdings', {}, 30_000);
+        brokerHeldQty = holdings.find((h) => h.symbol === sym)?.qty ?? 0;
       }
       let cost: number;
       if (opts.cost !== undefined) cost = parsePriceArg(opts.cost);
@@ -105,10 +115,9 @@ program
         if (!prevClose) throw invalidArgs('COST_REQUIRED', `取不到 ${sym} 前一交易日收盤價，請以 --cost 指定每股成本`);
         cost = prevClose;
       }
-      const qty = parseIntArg('--qty', opts.qty);
       return presentPosition(
         withPeakScaling(ctx, (db) =>
-          transferIn(db, { symbol: sym, qty, costPerShareX100: cost, actor: ACTOR, note: opts.note }, ctx.clock),
+          transferIn(db, { symbol: sym, qty, costPerShareX100: cost, brokerHeldQty, actor: ACTOR, note: opts.note }, ctx.clock),
         ),
       );
     }),
@@ -151,6 +160,126 @@ program
     admin('resume', opts, (ctx) => {
       resume(ctx.db, { resetPeak: !!opts.resetPeak, currentEquity: equityOf(ctx) }, ctx.clock);
       return getPause(ctx.db);
+    }),
+  );
+
+// ---------------------------------------------------------------- 玉山金鑰與連線檢查
+
+const secrets = program.command('secrets').description('玉山 API 金鑰（存放在作業系統的金鑰管理）');
+
+secrets
+  .command('import <profile>')
+  .description('從玉山金鑰網站下載的設定檔匯入金鑰，密碼以隱藏輸入（profile：esun-sim、esun-live、esun-marketdata）')
+  .requiredOption('--ini <path>', '玉山金鑰設定檔（.ini），讀取後不需保留在專案內')
+  .option('--cert <path>', '.p12 憑證檔的絕對路徑；未指定時使用設定檔中的路徑')
+  .action((profileArg: string, opts: { ini: string; cert?: string }) =>
+    admin('secrets import', { profile: profileArg }, async () => {
+      const profile = parseProfile(profileArg);
+      const ini = readEsunIni(resolve(opts.ini));
+      const sim = isSimulationUrl(ini.apiUrl) || ini.environment?.toUpperCase() === 'SIMULATION';
+      if (profile === 'esun-sim' && !sim) {
+        throw invalidArgs(
+          'PROFILE_MISMATCH',
+          '這份設定檔是正式環境，不能匯入為 esun-sim。paper 模式不需要 esun-sim：它使用真實行情（esun-marketdata，沒有時改用 esun-live）加本地模擬撮合，不會送出委託。esun-sim 只用於以玉山模擬金鑰測試下單串接',
+        );
+      }
+      if (profile === 'esun-live' && sim) throw invalidArgs('PROFILE_MISMATCH', '這份設定檔是模擬環境，不能匯入為 esun-live');
+
+      const certRaw = opts.cert ?? ini.certPath;
+      if (!certRaw) throw invalidArgs('CERT_REQUIRED', '設定檔沒有憑證路徑，請以 --cert 指定 .p12 檔');
+      // 相對路徑以設定檔所在目錄解析（SDK 會以目前工作目錄解析，容易指錯）
+      const certPath = isAbsolute(certRaw) ? certRaw : resolve(dirname(resolve(opts.ini)), certRaw);
+      const root = getCtx().root;
+      if (!relative(root, certPath).startsWith('..')) {
+        throw invalidArgs('CERT_IN_PROJECT', '憑證檔不可放在專案目錄內（規格第 12 節），請移到專案外再匯入');
+      }
+
+      const password = await promptHidden('玉山證券登入密碼：');
+      const certPass = await promptHidden('憑證密碼：');
+      const creds = { ...ini, password, certPass, certPath };
+      delete (creds as { environment?: string }).environment;
+      await keyringStore.set(profile, creds);
+      return { profile, stored: maskedCredentials(creds) };
+    }),
+  );
+
+secrets
+  .command('show [profile]')
+  .description('顯示已匯入的金鑰（遮罩）')
+  .action((profileArg?: string) =>
+    run(async () => {
+      const profiles = profileArg ? [parseProfile(profileArg)] : [...SECRET_PROFILES];
+      const out: Record<string, unknown> = {};
+      for (const p of profiles) {
+        const c = await keyringStore.get(p);
+        out[p] = c ? maskedCredentials(c) : null;
+      }
+      return out;
+    }),
+  );
+
+secrets
+  .command('delete <profile>')
+  .description('從金鑰管理刪除一組金鑰')
+  .action((profileArg: string) =>
+    admin('secrets delete', { profile: profileArg }, async () => ({
+      profile: profileArg,
+      deleted: await keyringStore.delete(parseProfile(profileArg)),
+    })),
+  );
+
+const broker = program.command('broker').description('玉山交易 API');
+
+broker
+  .command('check')
+  .description('登入並執行唯讀查詢：金鑰、憑證、交易權限、市場狀態、主機時間、庫存（第 1 階段驗收）')
+  .option('--profile <profile>', 'esun-sim 或 esun-live', 'esun-live')
+  .action((opts: { profile: string }) =>
+    admin('broker check', opts, async () => {
+      const profile = parseProfile(opts.profile);
+      if (profile === 'esun-marketdata') throw invalidArgs('INVALID_PROFILE', '行情金鑰請用 ctrade-admin market check');
+      const api = new EsunTradeApi(await requireCredentials(keyringStore, profile));
+      await api.login();
+      const diagnostics = await api.diagnostics();
+      let holdings: unknown;
+      try {
+        holdings = (await api.getHoldings()).map((h) => ({ symbol: h.symbol, qty: h.qty }));
+      } catch (e) {
+        holdings = { error: (e as Error).message };
+      }
+      const keyInfo = diagnostics.key_info as Record<string, unknown> | undefined;
+      if (keyInfo && typeof keyInfo.apiKey === 'string') keyInfo.apiKey = mask(keyInfo.apiKey);
+      // 憑證名稱含身分證字號（例如 A123456789-00-00::PCC005），只顯示遮罩後的值
+      const certInfo = diagnostics.cert_info as Record<string, unknown> | undefined;
+      if (certInfo && typeof certInfo.cn === 'string') certInfo.cn = mask(certInfo.cn, 2);
+      if (certInfo && typeof certInfo.serial === 'string') certInfo.serial = mask(certInfo.serial, 2);
+      return { profile, login: 'ok', ...diagnostics, holdings };
+    }),
+  );
+
+const market = program.command('market').description('玉山行情 API');
+
+market
+  .command('check')
+  .description('登入行情並取得一檔標的的參考價、漲跌停與報價（使用 esun-marketdata，沒有時改用 esun-live）')
+  .option('--symbol <symbol>', '代號', '0050')
+  .action((opts: { symbol: string }) =>
+    admin('market check', opts, async () => {
+      const md = await resolveMarketCredentials(keyringStore);
+      if (!md) {
+        throw new CtradeError('CREDENTIALS_MISSING', '金鑰管理中沒有 esun-marketdata 或 esun-live，請先以 ctrade-admin secrets import 匯入金鑰', ExitCode.BROKER_ERROR);
+      }
+      const api = new EsunMarketDataApi(md.creds);
+      await api.login();
+      const symbol = parseSymbol(opts.symbol);
+      const t = await api.ticker(symbol);
+      const q = await api.quote(symbol, false);
+      return {
+        credentials: md.profile,
+        login: 'ok',
+        ticker: { date: t.date, name: t.name, reference: t.referencePrice, limit_up: t.limitUpPrice, limit_down: t.limitDownPrice, board_lot: t.boardLot, status: t.securityStatus },
+        quote: { last: q.lastPrice ?? q.closePrice, bid: q.bids?.[0], ask: q.asks?.[0], updated: q.lastUpdated },
+      };
     }),
   );
 
