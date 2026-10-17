@@ -1,0 +1,18 @@
+node_modules/
+dist/
+
+# 帳本與執行期資料
+data/
+*.db
+*.db-wal
+*.db-shm
+logs/
+backup/
+.worktrees/
+
+# 機密：憑證與金鑰設定檔一律不進版控
+*.p12
+*.pfx
+config*.ini
+config/local.toml
+.env*

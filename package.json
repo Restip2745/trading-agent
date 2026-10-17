@@ -1,0 +1,36 @@
+{
+  "name": "trading-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Claude 自動交易系統：玉山證券 API + SQLite 影子帳本",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "ctrade": "dist/cli/ctrade.js",
+    "ctrade-admin": "dist/cli/ctrade-admin.js",
+    "ctrade-daemon": "dist/daemon/main.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "ctrade": "tsx cli/ctrade.ts",
+    "ctrade-admin": "tsx cli/ctrade-admin.ts",
+    "daemon": "tsx daemon/main.ts"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "commander": "^15.0.0",
+    "smol-toml": "^1.9.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^26.6.5",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
+  }
+}

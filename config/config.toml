@@ -1,0 +1,114 @@
+# trading-agent 設定檔
+#
+# 風控參數、費率與市場規則只在「首次建立資料庫」時當作初始值寫入 SQLite，
+# 之後一律以資料庫中的版本為準，修改請用 ctrade-admin 或 Web UI（規格第 6、7 節）。
+# 本機專用的覆寫值放在 config/local.toml（不進 git），結構與本檔相同。
+
+# 交易模式："paper"（模擬）或 "live"（真實）。Claude 無法在呼叫時切換（規格第 3 節）。
+mode = "paper"
+
+[risk]
+max_order_amount = 30000          # 單筆委託金額上限（元）
+max_position_pct = 100            # 單一持股市值占總權益上限（%），開放個股後建議 40
+max_exposure_pct = 150            # 總曝險占總權益上限（%），總曝險 = 市值 × |槓桿倍數|
+allow_opposite_positions = false  # 是否允許同時持有正向與反向標的
+max_orders_per_day = 20           # 每日委託次數上限（風險應對單不計入）
+max_orders_per_minute = 5         # 每分鐘新單與刪單合計上限（風險應對單不計入）
+max_round_trips_per_day = 3       # 同一標的每日完整買賣回合上限
+reentry_cooldown_min = 15         # 賣出後再買進同一標的的冷卻時間（分鐘）
+daily_loss_limit_pct = 10         # 當日虧損停機門檻，以開盤前總權益計算（%）
+intraday_drawdown_pct = 15        # 當日盤中回撤停機門檻，以當日權益高點計算（%）
+max_drawdown_pct = 25             # 跨日累計回撤停機門檻，以歷史權益高點計算（%）
+max_api_failures = 5              # 連續 API 失敗停機門檻
+max_broker_rejects = 3            # 連續被券商拒單停機門檻
+symbols_allowlist = ["0050", "00631L", "00632R"]
+
+# Claude 以 ctrade trigger set 調整觸發條件時的允許範圍（規格第 8 節）
+trigger_interval_min_range = [3, 30]
+trigger_up_pct_range = [1, 10]
+trigger_down_pct_range = [1, 8]
+
+[trigger.defaults]                # 每天開盤前重設的預設值
+interval_min = 5
+up_pct = 3
+down_pct = 2
+
+# 標的設定：category 決定證交稅率（stock 或 etf），leverage 為帶正負號的槓桿倍數（規格第 13 節）
+[symbols."0050"]
+name = "元大台灣50"
+category = "etf"
+leverage = 1
+
+[symbols."00631L"]
+name = "元大台灣50正2"
+category = "etf"
+leverage = 2
+
+[symbols."00632R"]
+name = "元大台灣50反1"
+category = "etf"
+leverage = -1
+
+# 費率初始值（規格第 7 節，實作時查證）。百分比以 % 為單位。
+[fees]
+fee_rate_pct = 0.1425             # 手續費率（法定上限）
+fee_discount = 1.0                # 手續費折扣，2.8 折填 0.28
+rebate_mode = "instant"           # "instant"（即時折讓）或 "monthly"（月退）
+min_fee_regular = 20              # 整股最低手續費（元）
+min_fee_odd = 1                   # 零股最低手續費（元）
+tax_stock_pct = 0.3               # 證交稅：一般股票
+tax_daytrade_pct = 0.15           # 證交稅：現股當沖
+tax_etf_pct = 0.1                 # 證交稅：ETF（含槓桿、反向）
+
+# 市場規則初始值（規格第 7 節，實作時依證交所現行規則查證）
+[market]
+price_limit_pct = 10
+odd_intraday_match_interval_sec = 60
+# 整股逐筆交易時段；之外（08:30–09:00、13:25–13:30）為集合競價，委託等待撮合價（規格第 7 節）
+continuous = ["09:00", "13:25"]
+
+# 各盤別允許送單的時段（含開盤前集合競價的委託時間）
+[market.sessions.regular]
+accept = ["08:30", "13:30"]
+[market.sessions.odd_intraday]
+accept = ["09:00", "13:30"]
+[market.sessions.odd_after]
+accept = ["13:40", "14:30"]
+
+# 升降單位表：[價格下限, 升降單位]，價格以元為單位
+[market.tick_sizes]
+stock = [[0, 0.01], [10, 0.05], [50, 0.1], [100, 0.5], [500, 1], [1000, 5]]
+etf = [[0, 0.01], [50, 0.05]]
+
+[market.fixed_triggers]           # 固定觸發時間（規格第 8 節）
+pre_open = "08:45"
+open = "09:01"
+pre_close = "13:20"
+review = "14:35"
+
+[paper]                           # 模擬撮合（規格第 7 節）
+fill_at_touch = false
+max_volume_share_pct = 20
+submit_delay_ms = [1000, 2000]
+
+[review]
+min_days = 5
+min_trades = 20
+
+[model]
+intraday = "claude-sonnet-5-5"
+review = "claude-opus-5-5"
+
+[claude]
+bin = "claude"                    # Claude Code CLI 執行檔
+timeout_min = 4                   # 單次工作階段逾時，逾時強制結束
+max_budget_usd = 0                # 單次呼叫的美元上限（--max-budget-usd，僅 API 計費適用），0 為不設定
+extra_args = []                   # 額外傳給 claude -p 的參數
+
+[stops]                           # 硬停損停利（規格第 6、8 節）
+order_ticks = 5                   # 觸價後以「最後成交價減幾檔」的限價賣出，不低於跌停價
+resend_interval_sec = 2           # 同一檔停損單重送的最短間隔
+
+[usage]
+daily_budget_tokens = 2000000
+weekly_budget_tokens = 10000000
