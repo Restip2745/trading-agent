@@ -5,6 +5,7 @@ import { allocate, transferIn } from '../core/ledger.js';
 import { evaluateEquityHalts, scalePeaksForFlow } from '../core/risk.js';
 import { addFeeSchedule, getFeeSchedule, setRiskParams } from '../core/settings.js';
 import { getPause, getState, pause, resume, setState } from '../core/state.js';
+import { activateStrategy, currentStrategy } from '../core/strategy.js';
 import { type TestEnv, errorCode, makeEnv } from './helpers.js';
 
 let env: TestEnv;
@@ -126,6 +127,21 @@ describe('決策記錄', () => {
     const row = env.db.prepare('SELECT * FROM decisions WHERE id = ?').get(id) as { next_trigger_json: string };
     expect(JSON.parse(row.next_trigger_json)).toMatchObject({ interval_min: 5 });
     expect(errorCode(() => addJournal(env.db, { reasoning: '  ', actions: 'x' }, env.clock))).toBe('EMPTY_REASONING');
+  });
+});
+
+describe('策略版本', () => {
+  it('記錄生效版本，重新啟用舊版本時成為目前版本', () => {
+    const a = 'a'.repeat(40);
+    const b = 'b'.repeat(40);
+    activateStrategy(env.db, a, 'v1', env.clock);
+    env.clock.advanceMinutes(1);
+    activateStrategy(env.db, b, 'v2', env.clock);
+    expect(currentStrategy(env.db)?.version).toBe(b);
+    env.clock.advanceMinutes(1);
+    activateStrategy(env.db, a, '回滾到 v1', env.clock);
+    expect(currentStrategy(env.db)).toMatchObject({ version: a, note: '回滾到 v1' });
+    expect(errorCode(() => activateStrategy(env.db, 'abc123', undefined, env.clock))).toBe('INVALID_VERSION');
   });
 });
 

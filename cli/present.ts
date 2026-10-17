@@ -90,6 +90,8 @@ export function presentQuoteDetail(d: QuoteDetail, category: SymbolCategory, rul
     bids: levels(d.book?.bids),
     asks: levels(d.book?.asks),
     odd_last: d.odd_last ? { price: formatPrice(d.odd_last.price_x100), volume: d.odd_last.volume, ts: d.odd_last.ts } : null,
+    odd_bids: levels(d.odd_book?.bids),
+    odd_asks: levels(d.odd_book?.asks),
     flags: { attention: !!q.is_attention, disposition: !!q.is_disposition, full_delivery: !!q.is_full_delivery, halted: !!q.is_halted },
     ts: q.ts,
     note: '五檔數量單位為股',

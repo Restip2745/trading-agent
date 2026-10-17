@@ -216,8 +216,9 @@ export class EsunMarketFeed implements MarketFeed {
   async candles(symbol: string, interval: string, count: number): Promise<unknown[]> {
     const tf = /^(\d+)m$/.exec(interval)?.[1];
     if (tf) {
+      // 日內 K 線以 date 欄位給出該根的起始時間（ISO，含 +08:00）；average 為當日累計成交均價（VWAP）
       const r = await this.api.intradayCandles(symbol, tf);
-      return (r.data ?? []).slice(-count).map((c: any) => ({ ...c, time: microsToIso(c.time ?? 0) }));
+      return (r.data ?? []).slice(-count);
     }
     if (interval === 'D' || interval === '1d') {
       const today = twDate(this.opts.clock.now());

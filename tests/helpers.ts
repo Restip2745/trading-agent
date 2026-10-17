@@ -68,6 +68,10 @@ export function makeEnv(iso = MONDAY_10AM): TestEnv {
   const root = projectRoot();
   const config = loadConfig(root);
   config.mode = 'paper';
+  // 測試的期望值以固定的數值計算，不受 config.toml 調整影響
+  config.risk.max_order_amount = 30_000;
+  config.fees.fee_discount = 1.0;
+  config.fees.rebate_mode = 'instant';
   const clock = testClock(iso);
   const db = openDb({ root, config, path: ':memory:', clock });
   const quotes = new TestQuotes();

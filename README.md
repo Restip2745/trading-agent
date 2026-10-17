@@ -233,9 +233,9 @@ ctrade order buy 0050 --qty 100 --price 55.20 --session odd_intraday
 
 **自動停機**條件：當日虧損 ≥ 開盤前權益的 10%、當日盤中從權益高點回撤 ≥ 15%、跨日從歷史權益高點回撤 ≥ 25%、對帳出現差異、券商 API 連續失敗、委託連續被拒。停機後只有使用者能恢復（因跨日回撤停機時，恢復須同時以目前權益重設歷史高點）；暫停期間 daemon 仍持續執行硬停損停利與委託同步。
 
-| 參數 | 建議初始值（以 10 萬元為基準） |
+| 參數 | 初始值（以 20 萬元啟動資金為基準，見 `config/config.toml`） |
 | --- | --- |
-| `max_order_amount` | 30,000 元 |
+| `max_order_amount` | 60,000 元 |
 | `max_position_pct` | 100%（ETF 階段） |
 | `max_exposure_pct` | 150% |
 | `max_orders_per_day` | 20 |

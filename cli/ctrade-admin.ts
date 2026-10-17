@@ -18,6 +18,8 @@ import { EsunMarketDataApi, EsunTradeApi } from '../daemon/esun/api.js';
 import { SECRET_PROFILES, isSimulationUrl, keyringStore, mask, maskedCredentials, parseProfile, readEsunIni, requireCredentials, resolveMarketCredentials } from '../core/secrets.js';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { promptHidden } from './prompt.js';
+import { spawnSync } from 'node:child_process';
+import { activateStrategy, currentStrategy, listStrategies } from '../core/strategy.js';
 import { isValidDate, twDate } from '../core/time.js';
 import { call } from '../core/ipc.js';
 import { type Ctx, daemonPath, getCtx, initMode, loadQuotes, parseIntArg, parseNumberArg, parsePriceArg, parseSymbol, run } from './common.js';
@@ -162,6 +164,38 @@ program
       return getPause(ctx.db);
     }),
   );
+
+// ---------------------------------------------------------------- 策略版本
+
+const STRATEGY_DIR = '.claude/skills/trading-strategy';
+
+function git(root: string, args: string[]): string {
+  const r = spawnSync('git', args, { cwd: root, encoding: 'utf8' });
+  if (r.status !== 0) throw new CtradeError('GIT_ERROR', `git ${args.join(' ')} 失敗：${r.stderr.trim()}`, ExitCode.INTERNAL);
+  return r.stdout.trim();
+}
+
+const strategy = program.command('strategy').description('策略版本（規格第 10 節）');
+
+strategy
+  .command('activate')
+  .description('把目前 commit 的策略 skill 記錄為生效版本；策略檔有未 commit 的修改時拒絕')
+  .option('--note <text>', '備註，例如核准原因')
+  .action((opts: { note?: string }) =>
+    admin('strategy activate', opts, (ctx) => {
+      const dirty = git(ctx.root, ['status', '--porcelain', '--', STRATEGY_DIR]);
+      if (dirty) throw invalidArgs('STRATEGY_UNCOMMITTED', `${STRATEGY_DIR} 有未 commit 的修改，請先 commit：\n${dirty}`);
+      const version = git(ctx.root, ['log', '-1', '--format=%H', '--', STRATEGY_DIR]);
+      if (!version) throw invalidArgs('STRATEGY_NOT_COMMITTED', `${STRATEGY_DIR} 尚未進版控`);
+      const subject = git(ctx.root, ['log', '-1', '--format=%s', version]);
+      return { ...activateStrategy(ctx.db, version, opts.note, ctx.clock), commit_subject: subject };
+    }),
+  );
+
+strategy
+  .command('show')
+  .description('目前生效的策略版本與歷史')
+  .action(() => run(() => ({ current: currentStrategy(getCtx().db) ?? null, history: listStrategies(getCtx().db) })));
 
 // ---------------------------------------------------------------- 玉山金鑰與連線檢查
 

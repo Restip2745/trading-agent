@@ -55,8 +55,8 @@ description: 交易工作階段操作系統的方法：ctrade 各指令的用途
 | `ctrade status` | 總覽：模式、暫停、時段、資金、權益、曝險、持倉、今日委託次數、觸發條件、用量 |
 | `ctrade balance` | 現金、圈存、可用資金 |
 | `ctrade positions` | 持股、可賣股數、平均成本 |
-| `ctrade quote <代號...>` | 最後成交價、漲跌停、升降單位、最佳五檔、零股最後成交、特殊狀態 |
-| `ctrade candles <代號> --interval 5m --count 60` | K 線（行情來源支援時） |
+| `ctrade quote <代號...>` | 最後成交價、漲跌停、升降單位、整股五檔（`bids`、`asks`）、零股最後成交與五檔（`odd_last`、`odd_bids`、`odd_asks`）、特殊狀態；五檔數量單位為股 |
+| `ctrade candles <代號> --interval 5m --count 60` | 日內 K 線（1m、5m、10m、15m、30m、60m），`date` 為該根起始時間，`average` 為當日累計成交均價（VWAP）、`volume` 單位為**張**（只含整股）；`--interval D` 為日 K（不含今天），`volume` 單位為**股**（含零股與鉅額交易） |
 | `ctrade orders [--open] [--date YYYY-MM-DD]` | 委託列表 |
 | `ctrade fills [--date YYYY-MM-DD]` | 成交列表 |
 | `ctrade fees` | 費率、稅率與市場規則，用來估算交易成本 |

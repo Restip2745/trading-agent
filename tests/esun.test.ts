@@ -311,7 +311,7 @@ class FakeMarketApi implements MarketDataApi {
       : { bids: [{ price: 14.98, size: 20 }], asks: [{ price: 14.99, size: 15 }], lastTrade: { price: 14.99 }, lastUpdated: 1_792_380_000_000_000 };
   }
   async intradayCandles() {
-    return { data: [1, 2, 3].map((i) => ({ open: i, close: i, time: 1_792_380_000_000_000 })) };
+    return { data: [1, 2, 3].map((i) => ({ date: `2026-10-16T09:0${i}:00.000+08:00`, open: i, close: i, average: i })) };
   }
   async historicalCandles() {
     return { data: [{ date: '2026-10-16' }, { date: '2026-10-15' }] };
@@ -376,7 +376,11 @@ describe('玉山行情來源', () => {
   });
 
   it('K 線：分 K 走日內、日 K 走歷史並依日期排序', async () => {
-    expect(await feed.candles('00632R', '5m', 2)).toHaveLength(2);
+    const bars = (await feed.candles('00632R', '5m', 2)) as { date: string; average: number }[];
+    expect(bars).toEqual([
+      { date: '2026-10-16T09:02:00.000+08:00', open: 2, close: 2, average: 2 },
+      { date: '2026-10-16T09:03:00.000+08:00', open: 3, close: 3, average: 3 },
+    ]);
     const daily = (await feed.candles('00632R', 'D', 5)) as { date: string }[];
     expect(daily.map((d) => d.date)).toEqual(['2026-10-15', '2026-10-16']);
     await expect(feed.candles('00632R', 'W', 5)).rejects.toThrow(/不支援/);

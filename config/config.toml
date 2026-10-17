@@ -8,7 +8,7 @@
 mode = "paper"
 
 [risk]
-max_order_amount = 30000          # 單筆委託金額上限（元）
+max_order_amount = 60000          # 單筆委託金額上限（元）；以 20 萬元啟動資金為基準（規格建議值以 10 萬為基準，等比例放大）
 max_position_pct = 100            # 單一持股市值占總權益上限（%），開放個股後建議 40
 max_exposure_pct = 150            # 總曝險占總權益上限（%），總曝險 = 市值 × |槓桿倍數|
 allow_opposite_positions = false  # 是否允許同時持有正向與反向標的
@@ -51,9 +51,13 @@ leverage = -1
 
 # 費率初始值（規格第 7 節，實作時查證）。百分比以 % 為單位。
 [fees]
-fee_rate_pct = 0.1425             # 手續費率（法定上限）
-fee_discount = 1.0                # 手續費折扣，2.8 折填 0.28
-rebate_mode = "instant"           # "instant"（即時折讓）或 "monthly"（月退）
+fee_rate_pct = 0.1425             # 手續費率：千分之 1.425（法定上限）
+# 玉山依當月成交金額累進折扣：0–100 萬 6 折、100–300 萬 5 折、300 萬以上 3.8 折；
+# Unicard 專案 2.8 折（2026/7/1–2027/3/31）。級距以整個帳戶計算，取最保守的 6 折。
+fee_discount = 0.6
+# 玉山實際為月退制（成交時收全額、次月 13 日退回折讓金）。月退入帳尚未實作，
+# 先以即時折讓計算，淨成本相同、只差在現金入帳時間。
+rebate_mode = "instant"
 min_fee_regular = 20              # 整股最低手續費（元）
 min_fee_odd = 1                   # 零股最低手續費（元）
 tax_stock_pct = 0.3               # 證交稅：一般股票
