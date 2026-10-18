@@ -1,3 +1,5 @@
+import Database from 'better-sqlite3';
+import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -5,6 +7,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { loadConfig, projectRoot } from '../core/config.js';
 import { testClock } from './helpers.js';
 import { buildServer } from '../web/server.js';
+import { renderMarkdown } from '../web/public/markdown.js';
+import { STRATEGY_DIR } from '../core/strategy.js';
 
 /**
  * Web UI 後端（規格第 11 節）。第 5 階段驗收：從 Web UI 撥入資金、轉入持股、暫停與恢復，帳本流水正確反映。
@@ -170,5 +174,37 @@ describe('驗證與錯誤', () => {
     await post('holiday', { date: '2026-10-21', reason: '颱風' });
     expect((await get('/api/system')).json().data.holidays).toEqual([{ date: '2026-10-21', reason: '颱風', source: 'user' }]);
     expect((await post('holiday', { date: '2026/10/21' })).json().error.code).toBe('INVALID_DATE');
+  });
+});
+
+describe('策略頁', () => {
+  it('尚未啟用版本時回報不一致，仍提供指標目錄', async () => {
+    const data = (await get('/api/strategy')).json().data;
+    expect(data.current).toBeNull();
+    expect(data.files_match).toMatchObject({ ok: false, reason: expect.stringContaining('尚未啟用') });
+    expect(data.files).toEqual([]);
+    expect(data.indicators.fields.map((f: { path: string }) => f.path)).toContain('intraday.vwap');
+  });
+
+  it('顯示生效版本在 git 裡的策略檔內容與指標引用檢查', async () => {
+    const version = spawnSync('git', ['log', '-1', '--format=%H', '--', STRATEGY_DIR], { cwd: projectRoot(), encoding: 'utf8' }).stdout.trim();
+    const db = new Database(join(dir, 'paper.db'));
+    db.prepare('INSERT INTO strategy_versions (version, activated_at, note) VALUES (?, ?, ?)').run(version, '2026-10-19T09:00:00.000+08:00', '測試');
+    db.close();
+    const data = (await get('/api/strategy')).json().data;
+    expect(data.current).toMatchObject({ version, note: '測試', subject: expect.any(String) });
+    expect(data.files.map((f: { name: string }) => f.name)).toEqual(expect.arrayContaining(['SKILL.md', 'reference.md']));
+    expect(data.files.find((f: { name: string }) => f.name === 'SKILL.md').content).toContain('name: trading-strategy');
+    expect(data.refs).toMatchObject({ ok: true, unknown: [] });
+  });
+
+  it('Markdown 轉換：跳脫 HTML、不輸出連結，支援表格與巢狀清單', () => {
+    const html = renderMarkdown(['# 標題', '<script>alert(1)</script> **粗** `a<b`', '', '| 欄 | 值 |', '| --- | --- |', '| x | [連結](javascript:alert(1)) |', '', '1. 一', '   - 子項', '2. 二'].join('\n'));
+    expect(html).not.toContain('<script>');
+    expect(html).not.toContain('javascript:');
+    expect(html).toContain('&lt;script&gt;');
+    expect(html).toContain('<strong>粗</strong> <code>a&lt;b</code>');
+    expect(html).toContain('<th>欄</th>');
+    expect(html).toContain('<ol><li>一<ul><li>子項</li></ul></li><li>二</li></ol>');
   });
 });

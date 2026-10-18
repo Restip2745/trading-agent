@@ -20,6 +20,7 @@ import type { MarketFeed } from './feeds.js';
 import { TriggerScheduler } from './scheduler.js';
 import { StopExecutor } from './stops.js';
 import { TriggerLoop } from './trigger-loop.js';
+import type { StrategyCheck } from '../core/strategy.js';
 
 export interface DaemonOptions {
   config: Config;
@@ -32,6 +33,8 @@ export interface DaemonOptions {
   broker?: BrokerAdapter;
   /** 不指定時使用 Claude Code CLI；false 代表不叫醒 Claude（只提供行情與送單）。 */
   claude?: ClaudeInvoker | false;
+  /** 叫醒 Claude 前比對策略檔與生效版本；daemon/main.ts 以 git 實作，不指定時不檢查（測試用）。 */
+  strategyCheck?: (version: string | null) => StrategyCheck;
   /** 維護工作（心跳、到期、清理、觸發）的間隔，測試時可設為 0 停用、改為手動呼叫 tick()。 */
   tickMs?: number;
   log?: (msg: string) => void;
@@ -96,6 +99,7 @@ export class Daemon {
         invoker: opts.claude ?? new ClaudeCliInvoker(config),
         env: { CTRADE_IPC_PATH: opts.ipcPath },
         log: this.log,
+        strategyCheck: opts.strategyCheck,
       });
     }
   }

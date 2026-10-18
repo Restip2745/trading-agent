@@ -181,6 +181,7 @@ textarea { width: 100%; min-height: 70px; }
 .notice { padding: 10px 14px; border-radius: 6px; margin-bottom: 12px; }
 .notice.warn { background: var(--warn-soft); }
 .notice.bad { background: var(--danger-soft); }
+.notice.ok { background: transparent; border: 1px solid var(--border); color: var(--down); }
 .pre { white-space: pre-wrap; word-break: break-word; }
 .tag { display: inline-block; padding: 0 8px; border-radius: 4px; background: var(--accent-soft); color: var(--accent); font-size: 12px; }
 .tag.warn { background: var(--warn-soft); color: var(--warn); }
@@ -209,3 +210,27 @@ svg.chart .axis { fill: var(--muted); font-size: 11px; }
 svg.chart .equity { fill: none; stroke: var(--accent); stroke-width: 2; }
 svg.chart .peak { fill: none; stroke: var(--muted); stroke-width: 1; stroke-dasharray: 4 3; }
 svg.chart .bar { fill: var(--accent); opacity: 0.7; }
+
+/* ---------------------------------------------------------------- 策略頁 */
+.tabs { display: flex; flex-wrap: wrap; gap: 4px; margin: 16px 0 10px; border-bottom: 1px solid var(--border); }
+.tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; padding: 6px 12px; }
+.tabs button.active { border-bottom-color: var(--accent); color: var(--accent); font-weight: 600; }
+.md { line-height: 1.7; font-size: 14px; }
+.md .md-h { font-weight: 600; margin: 20px 0 8px; }
+.md .md-h1 { font-size: 19px; margin-top: 4px; }
+.md .md-h2 { font-size: 16px; padding-bottom: 4px; border-bottom: 1px solid var(--border); }
+.md .md-h3, .md .md-h4 { font-size: 14px; }
+.md p { margin: 8px 0; }
+.md ul, .md ol { margin: 6px 0; padding-left: 24px; }
+.md li { margin: 3px 0; }
+.md code, .panel code, .notice code { font-family: var(--mono); font-size: 12px; background: var(--accent-soft); padding: 1px 5px; border-radius: 4px; }
+.md table { margin: 8px 0; }
+.md blockquote { margin: 8px 0; padding: 4px 12px; border-left: 3px solid var(--border); color: var(--muted); }
+.md pre { background: var(--bg); padding: 10px; border-radius: 6px; overflow-x: auto; }
+.md table.md-front { width: auto; margin-bottom: 12px; font-size: 12px; }
+.md table.md-front th { width: 90px; }
+.diff { max-height: 420px; overflow: auto; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 6px 0; margin-top: 6px; }
+.diff div { white-space: pre-wrap; word-break: break-word; padding: 0 10px; }
+.diff .add { background: rgba(31, 154, 85, 0.14); }
+.diff .del { background: rgba(198, 40, 40, 0.14); }
+.diff .hunk { color: var(--accent); }

@@ -1,7 +1,6 @@
-import { spawnSync } from 'node:child_process';
 import type { Config, RiskParams } from './config.js';
 import type { DB } from './db.js';
-import { CtradeError, ExitCode, invalidArgs } from './errors.js';
+import { invalidArgs } from './errors.js';
 import { call } from './ipc.js';
 import { allocate, transferIn, transferOut, withdraw } from './ledger.js';
 import { type Quote, type QuoteSource, staticQuotes, valuate } from './market.js';
@@ -9,7 +8,7 @@ import { checkLedgerConsistency, recordReconciliation } from './reconcile.js';
 import { scalePeaksForFlow } from './risk.js';
 import { type FeeScheduleInput, addFeeSchedule, getFeeSchedule, setRiskParams } from './settings.js';
 import { addHoliday, audit, getPause, getState, pause, resume, setState } from './state.js';
-import { activateStrategy } from './strategy.js';
+import { activateStrategy, git, STRATEGY_DIR } from './strategy.js';
 import { type Clock, isValidDate, toTwIso } from './time.js';
 
 /**
@@ -210,14 +209,6 @@ export const resolveReconciliation = (ctx: AdminContext, input: { id: number; no
   });
 
 // ---------------------------------------------------------------- 策略版本
-
-const STRATEGY_DIR = '.claude/skills/trading-strategy';
-
-function git(root: string, args: string[]): string {
-  const r = spawnSync('git', args, { cwd: root, encoding: 'utf8' });
-  if (r.status !== 0) throw new CtradeError('GIT_ERROR', `git ${args.join(' ')} 失敗：${r.stderr.trim()}`, ExitCode.INTERNAL);
-  return r.stdout.trim();
-}
 
 /** 把目前 commit 的策略 skill 記錄為生效版本；策略檔有未 commit 的修改時拒絕。 */
 export const activateCurrentStrategy = (ctx: AdminContext, input: { note?: string }) =>

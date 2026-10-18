@@ -1,4 +1,8 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { projectRoot } from '../core/config.js';
+import { INDICATOR_FIELDS, checkIndicatorRefs, indicatorsReport } from '../core/indicator-catalog.js';
 import {
   type Bar,
   atr,
@@ -106,5 +110,43 @@ describe('彙整', () => {
   it('沒有今天的資料時回傳 null，不會出錯', () => {
     const r = intradayIndicators([], [], null, new Date());
     expect(r).toMatchObject({ vwap: null, last_price: null, below_vwap_pct: null, last_bar: null, today_lots: null });
+  });
+});
+
+describe('指標目錄', () => {
+  const flatten = (o: unknown, prefix = ''): string[] =>
+    o && typeof o === 'object' && !Array.isArray(o)
+      ? Object.entries(o).flatMap(([k, v]) => flatten(v, prefix ? `${prefix}.${k}` : k))
+      : [prefix];
+
+  it('ctrade indicators 的輸出欄位與目錄完全一致', () => {
+    const t = (hhmm: string) => `2026-10-19T${hhmm}:00.000+08:00`;
+    const daily = Array.from({ length: 70 }, (_, i) => bar(`2026-07-${String(i).padStart(2, '0')}`, 100, 101, 99, 100 + (i % 3)));
+    const today = [bar(t('09:00'), 110, 110, 109, 109, 100), bar(t('09:05'), 109, 109, 108, 108.2, 50)];
+    const report = indicatorsReport('0050', t('09:11'), 108.5, dailyIndicators(daily, 108.5, [20, 60]), intradayIndicators(today, today, 108.5, new Date(t('09:11'))));
+    const keys = flatten(report)
+      .filter((k) => k !== 'notes')
+      .map((k) => k.replace(/^daily\.sma\.\d+\./, 'daily.sma.<n>.'));
+    expect(new Set(keys)).toEqual(new Set(INDICATOR_FIELDS.map((f) => f.path)));
+  });
+
+  it('策略文字的指標引用：對應欄位、未知欄位、均線週期是否有要求計算', () => {
+    const r = checkIndicatorRefs('看 `sma.20.including_today`、`daily.sma.120.value`、`below_vwap_pct` 與 `intraday.vwap_dev`；`ctrade status` 的 `equity` 不是指標');
+    expect(r.refs.map((x) => [x.token, x.field])).toEqual([
+      ['sma.20.including_today', 'daily.sma.<n>.including_today'],
+      ['daily.sma.120.value', 'daily.sma.<n>.value'],
+      ['below_vwap_pct', 'intraday.below_vwap_pct'],
+      ['intraday.vwap_dev', null],
+    ]);
+    expect(r).toMatchObject({ unknown: ['intraday.vwap_dev'], sma_periods: [20, 120], missing_periods: [120], ok: false });
+    expect(checkIndicatorRefs('`ctrade indicators 0050 --sma 20,120` 的 `daily.sma.120.value`')).toMatchObject({ missing_periods: [], ok: true });
+  });
+
+  it('目前的策略 skill 與 trading-cli skill 只引用存在的欄位', () => {
+    for (const file of ['.claude/skills/trading-strategy/SKILL.md', '.claude/skills/trading-cli/SKILL.md']) {
+      const r = checkIndicatorRefs(readFileSync(join(projectRoot(), file), 'utf8'));
+      expect({ file, unknown: r.unknown, missing: r.missing_periods }).toEqual({ file, unknown: [], missing: [] });
+      expect(r.refs.length).toBeGreaterThan(5);
+    }
   });
 });

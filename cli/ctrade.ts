@@ -17,6 +17,7 @@ import { getFeeSchedule, getMarketRules, getRiskParams } from '../core/settings.
 import { proposalEligibility, reviewData, submitReview } from '../core/review.js';
 import { buildStatus } from '../core/status.js';
 import { addDays, isValidDate, toTwIso, twDate } from '../core/time.js';
+import { DEFAULT_SMA_PERIODS, INDICATOR_FIELDS, INDICATOR_NOTES, indicatorsReport } from '../core/indicator-catalog.js';
 import { type Bar as IndicatorBar, dailyIndicators, intradayIndicators } from '../core/indicators.js';
 import { daemonPath, getCtx, initMode, loadQuotes, parseIntArg, parseNumberArg, parsePriceArg, parseSymbol, run } from './common.js';
 import {
@@ -148,14 +149,15 @@ program
 
 // ---------------------------------------------------------------- 技術指標
 
-const round = (v: number | null | undefined, d = 2) => (v === null || v === undefined || !Number.isFinite(v) ? null : Number(v.toFixed(d)));
-
 program
-  .command('indicators <symbol>')
+  .command('indicators [symbol]')
   .description('技術指標：日線均線（不含今天、昨日、含今天）、RSI、ATR、近 20 日高低，盤中 VWAP、偏離、日高低、止跌 K 線與量比')
-  .option('--sma <periods>', '日線均線週期，逗號分隔', '20,60')
-  .action((symbolArg: string, opts: { sma: string }) =>
+  .option('--sma <periods>', '日線均線週期，逗號分隔', DEFAULT_SMA_PERIODS.join(','))
+  .option('--list', '列出所有欄位的定義與單位（不需要代號，也不需要 daemon）')
+  .action((symbolArg: string | undefined, opts: { sma: string; list?: boolean }) =>
     run(async () => {
+      if (opts.list) return { default_sma_periods: DEFAULT_SMA_PERIODS, fields: INDICATOR_FIELDS, notes: INDICATOR_NOTES };
+      if (!symbolArg) throw invalidArgs('INVALID_ARGS', '請指定代號，例如 ctrade indicators 0050；ctrade indicators --list 列出欄位');
       const c = getCtx();
       const symbol = parseSymbol(symbolArg);
       const periods = opts.sma.split(',').map((v) => parseIntArg('--sma', v));
@@ -174,42 +176,7 @@ program
         call<IndicatorBar[]>(path, 'bars', { symbol, interval: '5m', from: today, to: today }, 30_000),
         call<IndicatorBar[]>(path, 'bars', { symbol, interval: '5m', from: addDays(today, -40), to: addDays(today, -1) }, 30_000),
       ]);
-      const d = dailyIndicators(daily, lastPrice, periods);
-      const i = intradayIndicators(todayBars, pastBars, lastPrice, now);
-      const sma = Object.fromEntries(
-        Object.entries(d.sma).map(([n, v]) => [n, { value: round(v.value), prev_day: round(v.prev_day), including_today: round(v.including_today) }]),
-      );
-      const bar = (b: IndicatorBar | null) => b && { start: b.date, open: b.open, high: b.high, low: b.low, close: b.close, volume_lots: b.volume };
-      return {
-        symbol,
-        as_of: toTwIso(now),
-        last_price: lastPrice,
-        daily: {
-          prev_date: d.prev_date,
-          prev_close: d.prev_close,
-          sma,
-          rsi14: round(d.rsi14),
-          atr14: round(d.atr14, 3),
-          high20: d.high20,
-          low20: d.low20,
-          note: '日 K 不含今天；including_today 以最後成交價代入今天的收盤',
-        },
-        intraday: {
-          bars_completed: i.bars_completed,
-          vwap: round(i.vwap, 3),
-          below_vwap_pct: round(i.below_vwap_pct === null ? null : i.below_vwap_pct * 100, 3),
-          day_high: i.day_high,
-          day_low: i.day_low,
-          above_day_low_pct: round(i.above_day_low_pct === null ? null : i.above_day_low_pct * 100, 3),
-          last_bar: i.last_bar && { ...bar(i.last_bar), volume_vs_avg: round(i.last_bar.volume_vs_avg, 2), close_above_prev_close: i.last_bar.close_above_prev_close },
-          prev_bar: bar(i.prev_bar),
-          avg_bar_lots: round(i.avg_bar_lots, 1),
-          today_lots: i.today_lots,
-          avg20_daily_lots: round(i.avg20_daily_lots, 0),
-          today_vs_avg20: round(i.today_vs_avg20, 3),
-          note: '只計已收完的 5 分 K；VWAP 以典型價格（高＋低＋收）/3 依量加權（與回測相同）；量的單位為張；百分比欄位單位為 %',
-        },
-      };
+      return indicatorsReport(symbol, toTwIso(now), lastPrice, dailyIndicators(daily, lastPrice, periods), intradayIndicators(todayBars, pastBars, lastPrice, now));
     }),
   );
 

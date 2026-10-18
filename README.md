@@ -2,7 +2,7 @@
 
 讓 Claude 透過玉山證券 API，在使用者撥給它的一筆**獨立資金**內自動交易台股。Claude 的資金與持倉全部記錄在本地 SQLite 影子帳本，與使用者其餘資產完全分開；所有元件都在使用者自己的電腦上執行，憑證不離開本機。
 
-> **專案狀態：第 1 至 5 階段程式完成。** 帳本核心、模擬撮合、daemon 與 IPC、觸發排程、硬停損停利、叫醒 Claude、玉山行情與券商轉接層、第一版策略（0050 波段核心＋衛星）、Web UI 都已完成，197 個自動化測試通過。待完成：paper 模式實際跑一個交易日的第 4 階段驗收、第 6 階段的復盤提案審核流程。券商 API 查證結果見 [`doc/broker-api-notes.md`](doc/broker-api-notes.md)。
+> **專案狀態：第 1 至 5 階段程式完成。** 帳本核心、模擬撮合、daemon 與 IPC、觸發排程、硬停損停利、叫醒 Claude、玉山行情與券商轉接層、第一版策略（0050 波段核心＋衛星）、Web UI、技術指標工具（`ctrade indicators`）都已完成，219 個自動化測試通過。待完成：paper 模式實際跑一個交易日的第 4 階段驗收、第 6 階段的復盤提案審核流程。券商 API 查證結果見 [`doc/broker-api-notes.md`](doc/broker-api-notes.md)。
 >
 > 目前的 `trading-strategy` skill 是**佔位版 v0：不開新倉**，只維護既有持倉的停損。第一版策略要依規格第 15 節撰寫後才會開始交易。
 >
@@ -200,7 +200,7 @@ trading-agent/
 | 類別 | 指令 |
 | --- | --- |
 | 狀態與帳本 | `status`、`balance`、`positions`、`history`、`fees` |
-| 行情與資訊 | `quote`、`candles`、`market`、`futures`、`flows`、`global`、`news` |
+| 行情與資訊 | `quote`、`candles`、`indicators`（技術指標，`--list` 列出欄位）、`market`、`futures`、`flows`、`global`、`news` |
 | 交易（限價單，不提供改單） | `order buy`、`order sell`、`order cancel`、`orders`、`fills` |
 | 持倉保護 | `stop show`、`stop set`（停損價只能上調） |
 | 觸發與記錄 | `trigger show`、`trigger set`、`journal add` |
@@ -278,6 +278,8 @@ Claude 每次決策結束前可用 `ctrade trigger set` 調整下一輪的觸發
 
 風控參數、觸發範圍、`trading-cli` skill 與程式碼一律不可由復盤修改。
 
+盤中的 Claude 讀的是專案目錄裡的策略檔，所以 daemon 每次叫醒 Claude 前都會比對策略檔與生效版本的 commit（`git diff`）。內容不同、多出檔案或無法確認時，不叫醒 Claude 做盤中決策（硬停損停利照常，復盤照常並在提示中註明），記錄一次 `strategy_mismatch` 風控事件；恢復一致後自動解除。`ctrade-admin strategy show` 與 Web UI 策略頁都會顯示比對結果。
+
 ## Web UI
 
 只在本機執行（`127.0.0.1`），頁首固定顯示交易模式（LIVE 以紅色標示）、系統狀態與 daemon 心跳。
@@ -297,7 +299,7 @@ npm run web
 | 資金管理 | 餘額、資金與持股流水 | 撥入、撥出、轉入持股、轉出持股 |
 | 風控 | 參數與風控事件 | 修改參數（顯示修改前後並二次確認） |
 | 費率與市場規則 | 費率版本、目前的市場規則 | 新增費率版本並指定生效日 |
-| 策略 | 生效版本、版本歷史、各版本已實現損益、修改提案 | 啟用目前 commit 的策略 |
+| 策略 | 生效版本的策略內容與設計紀錄（從 git 取出）、策略檔是否與生效版本一致（不一致時顯示差異）、可用技術指標與策略引用檢查、版本歷史、各版本已實現損益、修改提案 | 啟用目前 commit 的策略 |
 | 復盤 | 每日復盤筆記 | — |
 | 用量 | 每日 tokens、依觸發類型與模型的用量 | 設定自訂預算 |
 | 對帳 | 每日對帳結果與差異 | 手動對帳、標記差異已處理 |
@@ -306,7 +308,7 @@ npm run web
 - 所有寫入都呼叫 `core/admin.ts`，與 `ctrade-admin` 共用驗證邏輯，並寫入稽核記錄（操作者 `web`）。
 - 可切換檢視 `live.db` 或 `paper.db`，這只影響檢視；寫入一律作用在目前交易模式的帳本。
 - 緊急操作經 daemon 送單，daemon 未執行時無法使用。
-- 安全：只接受 Host 為 `127.0.0.1` 或 `localhost` 的請求（擋下 DNS rebinding）；寫入必須是 JSON 並帶有每次啟動隨機產生的 token（擋下跨站請求）；CSP 禁止外部腳本與被嵌入。Vue 在瀏覽器編譯模板需要 CSP 的 `unsafe-eval`，頁面內容一律經文字插值顯示、不使用 `v-html`。
+- 安全：只接受 Host 為 `127.0.0.1` 或 `localhost` 的請求（擋下 DNS rebinding）；寫入必須是 JSON 並帶有每次啟動隨機產生的 token（擋下跨站請求）；CSP 禁止外部腳本與被嵌入。Vue 在瀏覽器編譯模板需要 CSP 的 `unsafe-eval`，頁面內容一律經文字插值顯示；唯一的例外是策略頁顯示 skill 檔，經 `web/public/markdown.js` 轉換，所有文字先跳脫、不輸出連結與原始 HTML，才交給 `v-html`。
 - 測試時可用 `npm run web -- --port 8788 --db <暫存路徑>/paper.db` 改用指定的資料庫，不碰 `data/`。
 
 ## 安全

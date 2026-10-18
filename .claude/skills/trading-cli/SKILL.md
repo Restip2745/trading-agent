@@ -61,13 +61,14 @@ description: 交易工作階段操作系統的方法：ctrade 各指令的用途
 | `ctrade fills [--date YYYY-MM-DD]` | 成交列表 |
 | `ctrade fees` | 費率、稅率與市場規則，用來估算交易成本 |
 | `ctrade indicators <代號> [--sma 20,60]` | 技術指標，見下方「技術指標」；策略要求的數值一律從這裡取，不要自己從 K 線手算 |
+| `ctrade indicators --list` | 所有指標欄位的定義與單位（不需要 daemon） |
 | `ctrade history --days 20` | 每日快照 |
 | `ctrade trigger show` | 目前觸發條件與允許範圍 |
 | `ctrade stop show` | 硬停損停利價 |
 
 ### 技術指標（`ctrade indicators`）
 
-計算方式與回測腳本共用同一份程式（`core/indicators.ts`），所以照策略引用的數值，就是回測驗證過的定義。
+計算方式與回測腳本共用同一份程式（`core/indicators.ts`），所以照策略引用的數值，就是回測驗證過的定義。下表是常用欄位；完整清單與單位以 `ctrade indicators --list` 為準。策略引用了表中沒有的欄位時，代表策略寫錯，照「不確定時不動作」處理，並在決策記錄中註明。
 
 | 欄位 | 定義 |
 | --- | --- |
@@ -84,7 +85,7 @@ description: 交易工作階段操作系統的方法：ctrade 各指令的用途
 | `intraday.last_bar` | 最近一根**已收完**的 5 分 K；`close_above_prev_close` 為收盤是否高於前一根收盤，`volume_vs_avg` 為量相對今天已收完 5 分 K 的平均 |
 | `intraday.today_lots`、`avg20_daily_lots`、`today_vs_avg20` | 今天已收完 5 分 K 的量、近 20 個交易日每日平均量（皆為張）、兩者比值 |
 
-開盤前或非交易日，`intraday` 的欄位為 null。
+開盤前或非交易日，`intraday` 的欄位為 null。均線週期預設 20、60；策略要其他週期時加 `--sma`，例如 `--sma 20,60,120`。
 
 ### 下單與刪單
 

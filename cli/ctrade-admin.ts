@@ -43,7 +43,7 @@ import {
   resolveMarketCredentials,
 } from '../core/secrets.js';
 import { getFeeSchedule, getRiskParams } from '../core/settings.js';
-import { currentStrategy, listStrategies } from '../core/strategy.js';
+import { checkStrategyFiles, currentStrategy, listStrategies } from '../core/strategy.js';
 import { twDate } from '../core/time.js';
 import { DailyJobs } from '../daemon/daily.js';
 import { EsunMarketDataApi, EsunTradeApi } from '../daemon/esun/api.js';
@@ -166,8 +166,14 @@ strategy
 
 strategy
   .command('show')
-  .description('目前生效的策略版本與歷史')
-  .action(() => run(() => ({ current: currentStrategy(getCtx().db) ?? null, history: listStrategies(getCtx().db) })));
+  .description('目前生效的策略版本與歷史，以及專案目錄的策略檔是否與生效版本一致')
+  .action(() =>
+    run(() => {
+      const c = getCtx();
+      const current = currentStrategy(c.db) ?? null;
+      return { current, files_match: checkStrategyFiles(c.root, current?.version ?? null), history: listStrategies(c.db) };
+    }),
+  );
 
 // ---------------------------------------------------------------- 玉山金鑰與連線檢查
 

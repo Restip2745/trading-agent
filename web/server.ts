@@ -17,7 +17,8 @@ import { listFills, listOrders } from '../core/orders.js';
 import { getFeeSchedule, getMarketRules, getRiskParams } from '../core/settings.js';
 import { getPause, getState } from '../core/state.js';
 import { buildStatus } from '../core/status.js';
-import { listStrategies } from '../core/strategy.js';
+import { DEFAULT_SMA_PERIODS, INDICATOR_FIELDS, INDICATOR_NOTES, checkIndicatorRefs } from '../core/indicator-catalog.js';
+import { STRATEGY_DIR, checkStrategyFiles, git, listStrategies, strategyDiff, strategyFilesAt } from '../core/strategy.js';
 import { type Clock, isValidDate, twDate, twDayStartIso } from '../core/time.js';
 
 /**
@@ -373,8 +374,39 @@ export async function buildServer(o: WebOptions): Promise<{ app: FastifyInstance
          GROUP BY o.strategy_version`,
       )
       .all() as Record<string, unknown>[];
+    const versions = listStrategies(db).map((v) => {
+      let subject: string | null = null;
+      try {
+        subject = git(o.root, ['log', '-1', '--format=%s', v.version]);
+      } catch {
+        // 版本不在這個 repo（例如資料庫從別處複製過來），只顯示 hash
+      }
+      return { ...v, subject };
+    });
+    const current = versions[0] ?? null;
+    const filesMatch = checkStrategyFiles(o.root, current?.version ?? null);
+    // 顯示的是生效版本在 git 裡的內容；工作目錄有不同時另外附上差異
+    let files: { path: string; name: string; content: string }[] = [];
+    let contentError: string | null = null;
+    let diff: string | null = null;
+    if (current) {
+      try {
+        files = strategyFilesAt(o.root, current.version).map((f) => ({ ...f, name: f.path.slice(STRATEGY_DIR.length + 1) }));
+        if (!filesMatch.ok && filesMatch.changed.length > 0) diff = strategyDiff(o.root, current.version).slice(0, 200_000);
+      } catch (e) {
+        contentError = (e as Error).message;
+      }
+    }
+    const skill = files.find((f) => f.name === 'SKILL.md');
     return ok({
-      versions: listStrategies(db),
+      current,
+      files_match: filesMatch,
+      files,
+      content_error: contentError,
+      diff,
+      refs: skill ? checkIndicatorRefs(skill.content) : null,
+      indicators: { default_sma_periods: DEFAULT_SMA_PERIODS, fields: INDICATOR_FIELDS, notes: INDICATOR_NOTES },
+      versions,
       performance: perf.map((r) => ({ ...r, realized_pnl: Math.round(Number(r.realized_pnl)) })),
       proposals: db.prepare(`SELECT date, proposal_branch, status, reject_reason FROM reviews WHERE proposal_branch IS NOT NULL ORDER BY date DESC`).all(),
     });

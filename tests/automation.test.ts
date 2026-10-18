@@ -16,6 +16,7 @@ import { DailyJobs } from '../daemon/daily.js';
 import { TriggerScheduler } from '../daemon/scheduler.js';
 import { StopExecutor } from '../daemon/stops.js';
 import { TriggerLoop } from '../daemon/trigger-loop.js';
+import type { StrategyCheck } from '../core/strategy.js';
 import { ManualFeed } from '../daemon/feeds.js';
 import { Daemon } from '../daemon/service.js';
 import { type TestEnv, errorCode, makeEnv } from './helpers.js';
@@ -154,6 +155,43 @@ describe('叫醒 Claude', () => {
     await loop.tick();
     expect(claude.calls).toHaveLength(1);
     expect(getState(env.db, 'claude_unavailable')).toContain('budget_daily');
+  });
+
+  it('策略檔與生效版本不一致時不叫醒交易工作階段，復盤照常並在提示中註明；恢復一致後解除', async () => {
+    let check: StrategyCheck = { ok: false, version: null, changed: ['SKILL.md'], reason: '策略檔與生效版本不同：SKILL.md' };
+    const guarded = new TriggerLoop({
+      db: env.db,
+      config: env.config,
+      root,
+      clock: env.clock,
+      quotes: env.quotes,
+      scheduler,
+      daily,
+      invoker: claude,
+      env: {},
+      log: () => {},
+      strategyCheck: () => check,
+    });
+    env.clock.set(at('08:45'));
+    await guarded.tick();
+    env.clock.set(at('09:01'));
+    await guarded.tick();
+    expect(claude.calls).toHaveLength(0);
+    expect(events().map((e) => e.skip_reason)).toEqual([expect.stringContaining('strategy_mismatch'), expect.stringContaining('strategy_mismatch')]);
+    // 同一個原因只記一次風控事件
+    expect(env.db.prepare(`SELECT COUNT(*) FROM risk_events WHERE rule = 'strategy_mismatch'`).pluck().get()).toBe(1);
+    expect(getState(env.db, 'strategy_mismatch')).toContain('SKILL.md');
+
+    env.clock.set(at('14:35'));
+    await guarded.tick();
+    expect(claude.calls).toHaveLength(1);
+    expect(claude.calls[0]!.profile).toBe('review');
+    expect(claude.calls[0]!.prompt).toContain('策略檔與生效版本不一致');
+
+    check = { ok: true, version: 'v', changed: [], reason: null };
+    await guarded.execute({ kind: 'interval', fixed: false, reason: '定時' });
+    expect(claude.calls).toHaveLength(2);
+    expect(getState(env.db, 'strategy_mismatch')).toBeNull();
   });
 
   it('工作階段結束後更新價格參考價與定時觸發計時', async () => {

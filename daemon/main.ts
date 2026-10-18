@@ -15,6 +15,7 @@ import { loadConfig, projectRoot } from '../core/config.js';
 import { openDb } from '../core/db.js';
 import { ipcPath } from '../core/ipc.js';
 import { isSimulationUrl, keyringStore, requireCredentials, resolveMarketCredentials } from '../core/secrets.js';
+import { checkStrategyFiles, currentStrategy } from '../core/strategy.js';
 import { systemClock, toTwIso } from '../core/time.js';
 import type { BrokerAdapter } from './broker.js';
 import { EsunMarketDataApi, EsunTradeApi } from './esun/api.js';
@@ -81,6 +82,11 @@ async function main(): Promise<void> {
     }
   }
 
+  if (opts.claude) {
+    const check = checkStrategyFiles(root, currentStrategy(db)?.version ?? null);
+    if (!check.ok) console.warn(`${check.reason}。修正前不會叫醒 Claude 做交易決策`);
+  }
+
   const daemon = new Daemon({
     config,
     db,
@@ -90,6 +96,7 @@ async function main(): Promise<void> {
     ipcPath: ipcPath(root, config.mode),
     broker,
     claude: opts.claude ? undefined : false,
+    strategyCheck: (version) => checkStrategyFiles(root, version),
     log,
   });
 

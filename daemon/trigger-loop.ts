@@ -3,6 +3,7 @@ import type { Config } from '../core/config.js';
 import type { DB } from '../core/db.js';
 import type { QuoteSource } from '../core/market.js';
 import { buildStatus } from '../core/status.js';
+import { type StrategyCheck, currentStrategy } from '../core/strategy.js';
 import { getPause, getState, recordRiskEvent, setState } from '../core/state.js';
 import { type Clock, toTwIso, twDate } from '../core/time.js';
 import type { ClaudeInvoker, InvocationResult, Profile } from './claude.js';
@@ -17,6 +18,7 @@ import type { DueTrigger, TriggerScheduler } from './scheduler.js';
  *   - 執行中又有觸發時合併成一次待辦，結束後立即執行；固定觸發優先於動態觸發。
  *   - 逾時強制結束並記錄；呼叫失敗進入 claude_unavailable，停止呼叫 Claude，硬停損停利照常。
  *   - 工作階段結束後檢查有沒有寫入決策記錄。
+ *   - 策略檔與生效版本不一致時不叫醒 Claude 做交易決策（復盤照常，提示中註明）。
  */
 
 export interface TriggerLoopOptions {
@@ -31,6 +33,11 @@ export interface TriggerLoopOptions {
   /** 傳給 Claude 的環境變數（例如 CTRADE_IPC_PATH），讓 ctrade 找得到這個 daemon */
   env: Record<string, string>;
   log: (msg: string) => void;
+  /**
+   * 比對專案目錄的策略檔與生效版本（daemon 以 git 實作，見 core/strategy.ts）。
+   * 不指定時不檢查（測試用）。
+   */
+  strategyCheck?: (version: string | null) => StrategyCheck;
 }
 
 interface Pending extends DueTrigger {
@@ -123,6 +130,8 @@ export class TriggerLoop {
       setState(db, 'claude_unavailable', budget.reason ?? 'budget', clock);
       return void this.markSkipped(id, `claude_unavailable：${budget.reason}`);
     }
+    const mismatch = this.strategyMismatch();
+    if (mismatch && t.kind !== 'review') return void this.markSkipped(id, `strategy_mismatch：${mismatch}`);
     if (t.kind === 'review') await daily.closeOfDay();
 
     let release: () => void;
@@ -134,26 +143,24 @@ export class TriggerLoop {
 
     try {
       db.prepare('UPDATE trigger_events SET invoked_claude = 1, skip_reason = NULL WHERE id = ?').run(id);
-      return await this.invoke(t, id);
+      return await this.invoke(t, id, mismatch);
     } finally {
       release();
     }
   }
 
-  private async invoke(t: Pending, id: number): Promise<InvocationResult> {
+  private async invoke(t: Pending, id: number, mismatch: string | null): Promise<InvocationResult> {
     const { db, config, clock, root, quotes } = this.o;
     const now = clock.now();
     const profile: Profile = t.kind === 'review' ? 'review' : 'trading';
     const model = profile === 'review' ? config.model.review : config.model.intraday;
-    const strategyVersion =
-      (db.prepare('SELECT version FROM strategy_versions ORDER BY activated_at DESC LIMIT 1').pluck().get() as string | undefined) ??
-      'unversioned';
+    const strategyVersion = currentStrategy(db)?.version ?? 'unversioned';
 
     const prompt = renderPrompt(root, t, {
       mode: config.mode,
       now: toTwIso(now),
       status: buildStatus(db, config, clock, quotes),
-      notes: this.notesFor(t),
+      notes: this.notesFor(t, mismatch),
     });
     const env: Record<string, string> = {
       ...this.o.env,
@@ -179,8 +186,34 @@ export class TriggerLoop {
     return result;
   }
 
-  private notesFor(t: Pending): string[] {
+  /**
+   * 策略檔與生效版本不一致時回傳原因。同一個原因只記錄一次風控事件；恢復一致時清除狀態。
+   */
+  private strategyMismatch(): string | null {
+    const { db, clock, strategyCheck } = this.o;
+    if (!strategyCheck) return null;
+    const version = currentStrategy(db)?.version ?? null;
+    const r = strategyCheck(version);
+    const prev = getState(db, 'strategy_mismatch');
+    if (r.ok) {
+      if (prev) {
+        setState(db, 'strategy_mismatch', null, clock);
+        this.o.log('策略檔已與生效版本一致，恢復叫醒 Claude');
+      }
+      return null;
+    }
+    const reason = r.reason ?? '策略檔與生效版本不一致';
+    if (prev !== reason) {
+      setState(db, 'strategy_mismatch', reason, clock);
+      recordRiskEvent(db, 'strategy_mismatch', { version, changed: r.changed, reason }, 'warn', clock);
+      this.o.log(`不叫醒 Claude 做交易決策：${reason}`);
+    }
+    return reason;
+  }
+
+  private notesFor(t: Pending, strategyMismatch: string | null = null): string[] {
     const notes: string[] = [];
+    if (strategyMismatch) notes.push(`策略檔與生效版本不一致，今天的盤中決策已暫停叫醒：${strategyMismatch}。復盤請以生效版本（ctrade-admin strategy show 由使用者查看）為準，並在筆記中提醒使用者處理。`);
     const warning = getState(this.o.db, 'usage_warning');
     if (warning) notes.push(`用量已達預算 80%：${warning}`);
     if (t.kind === 'pre_open') {

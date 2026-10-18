@@ -3,6 +3,7 @@
  * 寫入請求帶 X-Ctrade-Token（由伺服器嵌在頁面 meta 中）；所有寫入都由後端的 core/admin.ts 驗證。
  */
 import { computed, createApp, onMounted, onUnmounted, reactive, ref, watch } from '/vendor/vue/vue.esm-browser.prod.js';
+import { renderMarkdown } from './markdown.js';
 
 const TOKEN = document.querySelector('meta[name="ctrade-token"]').content;
 const ACTIVE_MODE = document.querySelector('meta[name="ctrade-mode"]').content;
@@ -759,6 +760,31 @@ const Strategy = {
   components: { DataTable, ReadOnlyNote },
   setup() {
     const { data, error } = useData(() => get('strategy'));
+    let saved = null;
+    try {
+      saved = localStorage.getItem('ctrade-strategy-tab');
+    } catch {}
+    const tab = ref(saved ?? 'SKILL.md');
+    watch(tab, (v) => {
+      try {
+        localStorage.setItem('ctrade-strategy-tab', v);
+      } catch {}
+    });
+    const tabs = computed(() => [
+      ...(data.value?.files ?? []).map((f) => ({ key: f.name, label: f.name === 'SKILL.md' ? '策略內容' : f.name === 'reference.md' ? '設計與回測紀錄' : f.name })),
+      { key: 'indicators', label: '可用指標' },
+      { key: 'versions', label: '版本與績效' },
+    ]);
+    const currentTab = computed(() => (tabs.value.some((t) => t.key === tab.value) ? tab.value : tabs.value[0]?.key));
+    const file = computed(() => data.value?.files?.find((f) => f.name === currentTab.value));
+    const html = computed(() => (file.value ? renderMarkdown(file.value.content) : ''));
+    const indicatorRows = computed(() => {
+      const used = new Set((data.value?.refs?.refs ?? []).map((r) => r.field).filter(Boolean));
+      return (data.value?.indicators.fields ?? []).map((f) => ({ ...f, used: used.has(f.path) ? '✓' : '' }));
+    });
+    const diffLines = computed(() =>
+      (data.value?.diff ?? '').split('\n').map((text) => ({ text, cls: /^\+(?!\+\+)/.test(text) ? 'add' : /^-(?!--)/.test(text) ? 'del' : /^@@/.test(text) ? 'hunk' : '' })),
+    );
     const activate = async () => {
       const note = await askInput('啟用目前 commit 的策略', ['把最後一次修改 trading-strategy skill 的 commit 記錄為生效版本。', '策略檔有未 commit 的修改時會被拒絕。'], {
         label: '備註（例如核准原因）',
@@ -767,7 +793,7 @@ const Strategy = {
       if (note === null) return;
       await act('strategy-activate', { note: note || undefined }, { success: '已記錄策略版本' });
     };
-    return { data, error, activate, fmt, isActiveView };
+    return { data, error, activate, fmt, isActiveView, tab, tabs, currentTab, file, html, indicatorRows, diffLines };
   },
   template: `
     <h2>策略</h2>
@@ -776,38 +802,90 @@ const Strategy = {
     <template v-if="data">
       <div class="panel">
         <div class="actions">
-          <div><strong>目前版本：</strong><span class="mono">{{ data.versions[0]?.version?.slice(0, 12) ?? '尚未記錄' }}</span> <span class="muted">{{ data.versions[0]?.note }}</span></div>
+          <div>
+            <strong>生效版本：</strong>
+            <span class="mono">{{ data.current?.version?.slice(0, 12) ?? '尚未記錄' }}</span>
+            <span v-if="data.current?.subject" style="margin-left:8px">{{ data.current.subject }}</span>
+            <div class="muted" v-if="data.current">啟用於 {{ fmt.time(data.current.activated_at) }}<span v-if="data.current.note">　{{ data.current.note }}</span></div>
+          </div>
           <span class="spacer"></span>
           <button :disabled="!isActiveView" @click="activate">啟用目前 commit 的策略</button>
         </div>
       </div>
-      <h3>版本歷史</h3>
-      <div class="panel">
-        <DataTable :rows="data.versions" :cols="[
-          { key: 'version', label: '版本', mono: true, fmt: (v) => v.slice(0, 12) },
-          { key: 'activated_at', label: '啟用時間', fmt: fmt.time },
-          { key: 'note', label: '備註' },
-        ]" />
+
+      <div v-if="data.files_match.ok" class="notice ok">專案目錄的策略檔與生效版本一致，Claude 讀到的就是下面的內容。</div>
+      <div v-else class="notice bad">
+        <strong>專案目錄的策略檔與生效版本不一致：daemon 不會叫醒 Claude 做盤中決策（硬停損停利照常）。</strong>
+        <div>{{ data.files_match.reason }}</div>
+        <div class="muted">處理方式：確認修改無誤後 commit，再按「啟用目前 commit 的策略」；或把策略檔還原成生效版本。</div>
+        <details v-if="data.diff" style="margin-top:8px">
+          <summary>工作目錄相對生效版本的差異</summary>
+          <div class="diff mono"><div v-for="(l, i) in diffLines" :key="i" :class="l.cls">{{ l.text || ' ' }}</div></div>
+        </details>
       </div>
-      <h3>各版本績效</h3>
-      <div class="panel">
-        <DataTable :rows="data.performance" empty="還沒有委託" :cols="[
-          { key: 'version', label: '版本', mono: true, fmt: (v) => v ? v.slice(0, 12) : '（未記錄版本）' },
-          { key: 'orders', label: '委託', num: true },
-          { key: 'fills', label: '成交', num: true },
-          { key: 'realized_pnl', label: '已實現損益', num: true, fmt: fmt.signed, cls: (r) => fmt.cls(r.realized_pnl) },
-          { key: 'fees_tax', label: '手續費與稅', num: true, fmt: fmt.money },
-        ]" />
+      <div v-if="data.content_error" class="notice bad">無法從 git 取出生效版本的內容：{{ data.content_error }}</div>
+
+      <div class="tabs">
+        <button v-for="t in tabs" :key="t.key" :class="{ active: currentTab === t.key }" @click="tab = t.key">{{ t.label }}</button>
       </div>
-      <h3>策略修改提案</h3>
-      <div class="panel">
-        <DataTable :rows="data.proposals" empty="沒有提案。提案審核與合併流程在第 6 階段實作。" :cols="[
-          { key: 'date', label: '日期' },
-          { key: 'proposal_branch', label: '分支', mono: true },
-          { key: 'status', label: '狀態' },
-          { key: 'reject_reason', label: '駁回原因' },
-        ]" />
+
+      <div v-if="file" class="panel md">
+        <div class="muted mono" style="margin-bottom:8px">{{ file.path }} @ {{ data.current.version.slice(0, 12) }}</div>
+        <div v-html="html"></div>
       </div>
+
+      <template v-else-if="currentTab === 'indicators'">
+        <div class="panel">
+          <p style="margin-top:0">Claude 以 <code>ctrade indicators &lt;代號&gt;</code> 取得這些欄位（<code>ctrade indicators --list</code> 列出同一份清單）。計算與回測共用 <code>core/indicators.ts</code>。</p>
+          <ul><li v-for="n in data.indicators.notes" :key="n">{{ n }}</li></ul>
+          <template v-if="data.refs">
+            <div v-if="data.refs.ok" class="notice ok">策略引用的 {{ data.refs.refs.length }} 個欄位都存在；用到的均線週期 {{ data.refs.sma_periods.join('、') || '（無）' }} 都有計算。</div>
+            <div v-else class="notice bad">
+              <div v-if="data.refs.unknown.length">策略引用了不存在的欄位：<code v-for="u in data.refs.unknown" :key="u" style="margin-right:6px">{{ u }}</code></div>
+              <div v-if="data.refs.missing_periods.length">策略用到均線週期 {{ data.refs.missing_periods.join('、') }}，但沒有以 --sma 要求計算（目前 {{ data.refs.requested_periods.join('、') }}）。</div>
+            </div>
+          </template>
+        </div>
+        <div class="panel">
+          <DataTable :rows="indicatorRows" :cols="[
+            { key: 'path', label: '欄位', mono: true },
+            { key: 'unit', label: '單位' },
+            { key: 'description', label: '定義' },
+            { key: 'used', label: '策略引用' },
+          ]" />
+        </div>
+      </template>
+
+      <template v-else-if="currentTab === 'versions'">
+        <h3>版本歷史</h3>
+        <div class="panel">
+          <DataTable :rows="data.versions" :cols="[
+            { key: 'version', label: '版本', mono: true, fmt: (v) => v.slice(0, 12) },
+            { key: 'subject', label: 'commit' },
+            { key: 'activated_at', label: '啟用時間', fmt: fmt.time },
+            { key: 'note', label: '備註' },
+          ]" />
+        </div>
+        <h3>各版本績效</h3>
+        <div class="panel">
+          <DataTable :rows="data.performance" empty="還沒有委託" :cols="[
+            { key: 'version', label: '版本', mono: true, fmt: (v) => v ? v.slice(0, 12) : '（未記錄版本）' },
+            { key: 'orders', label: '委託', num: true },
+            { key: 'fills', label: '成交', num: true },
+            { key: 'realized_pnl', label: '已實現損益', num: true, fmt: fmt.signed, cls: (r) => fmt.cls(r.realized_pnl) },
+            { key: 'fees_tax', label: '手續費與稅', num: true, fmt: fmt.money },
+          ]" />
+        </div>
+        <h3>策略修改提案</h3>
+        <div class="panel">
+          <DataTable :rows="data.proposals" empty="沒有提案。提案審核與合併流程在第 6 階段實作。" :cols="[
+            { key: 'date', label: '日期' },
+            { key: 'proposal_branch', label: '分支', mono: true },
+            { key: 'status', label: '狀態' },
+            { key: 'reject_reason', label: '駁回原因' },
+          ]" />
+        </div>
+      </template>
     </template>`,
 };
 
