@@ -2,7 +2,7 @@
 
 讓 Claude 透過玉山證券 API，在使用者撥給它的一筆**獨立資金**內自動交易台股。Claude 的資金與持倉全部記錄在本地 SQLite 影子帳本，與使用者其餘資產完全分開；所有元件都在使用者自己的電腦上執行，憑證不離開本機。
 
-> **專案狀態：第 3、4 階段程式完成，待以真實金鑰驗收。** 帳本核心、模擬撮合、daemon 與 IPC、下單與刪單、觸發排程、硬停損停利、叫醒 Claude、每日重設／停機檢查／對帳快照備份、兩個 skill 與提示範本、玉山行情與券商轉接層都已完成，173 個自動化測試通過。尚缺以真實金鑰的連線驗收、第一版交易策略與 Web UI。券商 API 查證結果見 [`doc/broker-api-notes.md`](doc/broker-api-notes.md)。
+> **專案狀態：第 1 至 5 階段程式完成。** 帳本核心、模擬撮合、daemon 與 IPC、觸發排程、硬停損停利、叫醒 Claude、玉山行情與券商轉接層、第一版策略（0050 波段核心＋衛星）、Web UI 都已完成，197 個自動化測試通過。待完成：paper 模式實際跑一個交易日的第 4 階段驗收、第 6 階段的復盤提案審核流程。券商 API 查證結果見 [`doc/broker-api-notes.md`](doc/broker-api-notes.md)。
 >
 > 目前的 `trading-strategy` skill 是**佔位版 v0：不開新倉**，只維護既有持倉的停損。第一版策略要依規格第 15 節撰寫後才會開始交易。
 >
@@ -171,7 +171,7 @@ trading-agent/
 ├── core/                      # 帳本、風控、模擬撮合、券商轉接層
 ├── cli/                       # ctrade 與 ctrade-admin 進入點
 ├── daemon/                    # 行情來源、送單轉接層、IPC 服務；之後加入排程、觸發、停損
-├── web/                       # Node.js 後端 + Vue 3
+├── web/                       # Fastify 後端（server.ts）+ Vue 3 前端（public/，不需建置）
 ├── prompts/                   # 各觸發類型的提示範本
 ├── reviews/                   # 每日復盤筆記
 ├── migrations/
@@ -218,7 +218,7 @@ ctrade order buy 0050 --qty 100 --price 55.20 --session odd_intraday
 
 ### `ctrade-admin`（使用者與 Web UI 使用）
 
-`allocate` / `withdraw`（撥入、撥出資金）、`transfer-in` / `transfer-out`（持股轉入、轉出 Claude 帳本）、`pause` / `resume`、`reconcile`、`snapshot`、`risk show|set`、`fees set`、`rules set`、`cancel-all` / `flatten`（緊急操作）、`holiday add`、`strategy approve|reject|rollback`。所有操作都寫入 `audit_log`。
+`allocate` / `withdraw`（撥入、撥出資金）、`transfer-in` / `transfer-out`（持股轉入、轉出 Claude 帳本）、`pause` / `resume`、`cancel-all` / `flatten`（緊急操作）、`reconcile [resolve]`、`snapshot`、`risk show|set`、`fees show|set`、`holiday add`、`strategy activate|show`、`claude reset`、`usage budget`、`secrets import|show|delete`、`broker check`、`market check`。所有寫入都經過 `core/admin.ts`（與 Web UI 共用），並寫入 `audit_log`。
 
 ## 風控摘要
 
@@ -280,7 +280,34 @@ Claude 每次決策結束前可用 `ctrade trigger set` 調整下一輪的觸發
 
 ## Web UI
 
-只在本機執行（`127.0.0.1`），頁首固定顯示交易模式、系統狀態與 daemon 心跳。頁面包含：總覽、持倉、委託與成交、決策日誌、資金管理、風控、費率與市場規則、策略、復盤、用量、對帳、系統，以及「刪除所有未完成委託」「全部平倉」兩個緊急操作。
+只在本機執行（`127.0.0.1`），頁首固定顯示交易模式（LIVE 以紅色標示）、系統狀態與 daemon 心跳。
+
+```bash
+npm run web
+```
+
+開啟 http://127.0.0.1:8787（埠號在 `config/config.toml` 的 `[web]` 設定）。
+
+| 頁面 | 內容 | 可執行的操作 |
+| --- | --- | --- |
+| 總覽 | 權益、可用資金、圈存、今日與累計損益、曝險、權益曲線、今日觸發 | 暫停、恢復、刪除所有未完成委託、全部平倉 |
+| 持倉 | 股數、成本、現價、未實現損益、硬停損停利價 | 轉出持股給使用者 |
+| 委託與成交 | 委託列表與狀態、成交明細與費用 | — |
+| 決策日誌 | 每次觸發的原因、Claude 的理由與動作、下一輪觸發條件 | 篩選、搜尋、查看工作階段完整過程 |
+| 資金管理 | 餘額、資金與持股流水 | 撥入、撥出、轉入持股、轉出持股 |
+| 風控 | 參數與風控事件 | 修改參數（顯示修改前後並二次確認） |
+| 費率與市場規則 | 費率版本、目前的市場規則 | 新增費率版本並指定生效日 |
+| 策略 | 生效版本、版本歷史、各版本已實現損益、修改提案 | 啟用目前 commit 的策略 |
+| 復盤 | 每日復盤筆記 | — |
+| 用量 | 每日 tokens、依觸發類型與模型的用量 | 設定自訂預算 |
+| 對帳 | 每日對帳結果與差異 | 手動對帳、標記差異已處理 |
+| 系統 | daemon 狀態、觸發條件、固定觸發時間、休市日、稽核記錄 | 標記臨時休市、解除 Claude 無法使用 |
+
+- 所有寫入都呼叫 `core/admin.ts`，與 `ctrade-admin` 共用驗證邏輯，並寫入稽核記錄（操作者 `web`）。
+- 可切換檢視 `live.db` 或 `paper.db`，這只影響檢視；寫入一律作用在目前交易模式的帳本。
+- 緊急操作經 daemon 送單，daemon 未執行時無法使用。
+- 安全：只接受 Host 為 `127.0.0.1` 或 `localhost` 的請求（擋下 DNS rebinding）；寫入必須是 JSON 並帶有每次啟動隨機產生的 token（擋下跨站請求）；CSP 禁止外部腳本與被嵌入。Vue 在瀏覽器編譯模板需要 CSP 的 `unsafe-eval`，頁面內容一律經文字插值顯示、不使用 `v-html`。
+- 測試時可用 `npm run web -- --port 8788 --db <暫存路徑>/paper.db` 改用指定的資料庫，不碰 `data/`。
 
 ## 安全
 
@@ -309,7 +336,7 @@ Claude 每次決策結束前可用 `ctrade trigger set` 調整下一輪的觸發
 - [x] **2. 帳本核心**：schema、migration、推導 view、`ctrade-admin` 資金與持股操作、風控函式庫，單元測試全數通過。
 - [ ] **3. 行情與模擬撮合**：行情接入、模擬撮合引擎、`ctrade` 全部指令，以錄製行情重播驗證。（模擬撮合、daemon IPC、下單與刪單、玉山行情與券商轉接層已完成；待以真實金鑰驗證、在玉山模擬環境驗證下單與刪單；`market`／`news` 等盤外資訊指令待做）
 - [ ] **4. Daemon 與 Claude Code 整合**：觸發、硬停損停利、兩個 skill、提示範本、權限設定，paper 模式完整跑一個交易日。（程式與測試已完成；驗收需要真實行情與第一版策略，在 paper 模式實際跑一個交易日）
-- [ ] **5. Web UI**：所有頁面與操作。
+- [x] **5. Web UI**：所有頁面與操作。（已從 Web UI 撥入資金、轉入持股、暫停與恢復，帳本流水正確反映）
 - [ ] **6. 復盤流程與模擬運行**：連續 10 個交易日無對帳錯誤，至少完成一次策略提案審核。
 - [ ] **7. live 小額試跑**：至少 5 個交易日每日對帳全數通過，再逐步提高資金。
 

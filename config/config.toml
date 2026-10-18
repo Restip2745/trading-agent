@@ -116,3 +116,6 @@ resend_interval_sec = 2           # 同一檔停損單重送的最短間隔
 [usage]
 daily_budget_tokens = 2000000
 weekly_budget_tokens = 10000000
+
+[web]                             # Web UI（規格第 11 節），只綁定 127.0.0.1
+port = 8787

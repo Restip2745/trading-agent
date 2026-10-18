@@ -14,6 +14,7 @@ import { getState, isTradingDay, recordRiskEvent, setState } from '../core/state
 import { type Clock, toTwIso, twDate, twHhmm } from '../core/time.js';
 import { type BrokerAdapter, PaperBroker } from './broker.js';
 import { type ClaudeInvoker, ClaudeCliInvoker } from './claude.js';
+import { cancelAll, flatten } from './emergency.js';
 import { DailyJobs } from './daily.js';
 import type { MarketFeed } from './feeds.js';
 import { TriggerScheduler } from './scheduler.js';
@@ -244,6 +245,12 @@ export class Daemon {
         const order = await this.broker.cancel(id);
         return { order, fills: listFills(this.opts.db, { orderId: id }) };
       }
+      case 'cancel_all':
+        return cancelAll(this.opts.db, this.broker, this.opts.clock);
+      case 'flatten':
+        // 持股在 daemon 啟動時就已訂閱行情（watchSymbols 含帳本持股），不重新訂閱：
+        // 玉山行情來源重新訂閱會再開 WebSocket，超過 2 條連線的上限
+        return flatten(this.opts.db, this.opts.config, this.opts.clock, this.quotes, (s, b) => this.quotes.book(s, b), this.broker);
       case 'broker_holdings': {
         if (!this.broker.holdings) {
           throw new CtradeError('BROKER_UNSUPPORTED', `送單轉接層 ${this.broker.name} 不提供券商庫存`, ExitCode.BROKER_ERROR);

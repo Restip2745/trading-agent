@@ -10,7 +10,8 @@
   "bin": {
     "ctrade": "dist/cli/ctrade.js",
     "ctrade-admin": "dist/cli/ctrade-admin.js",
-    "ctrade-daemon": "dist/daemon/main.js"
+    "ctrade-daemon": "dist/daemon/main.js",
+    "ctrade-web": "dist/web/main.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
@@ -19,14 +20,18 @@
     "test:watch": "vitest",
     "ctrade": "tsx cli/ctrade.ts",
     "ctrade-admin": "tsx cli/ctrade-admin.ts",
-    "daemon": "tsx daemon/main.ts"
+    "daemon": "tsx daemon/main.ts",
+    "web": "tsx web/main.ts"
   },
   "dependencies": {
     "@esun/marketdata": "file:vendor/esun-marketdata-2.2.0.tgz",
     "@esun/trade": "file:vendor/esun-trade-2.2.0.tgz",
+    "@fastify/static": "^10.1.6",
     "better-sqlite3": "^13.0.3",
     "commander": "^15.0.0",
-    "smol-toml": "^1.9.1"
+    "fastify": "^5.12.7",
+    "smol-toml": "^1.9.1",
+    "vue": "^3.5.44"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^9.6.0",

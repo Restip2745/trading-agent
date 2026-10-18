@@ -1,60 +1,70 @@
 #!/usr/bin/env node
 /**
  * ctrade-admin：只給使用者與 Web UI 使用的管理 CLI（規格第 5 節）。
- * Claude Code 的權限設定不開放這個執行檔。所有操作都寫入 audit_log。
+ * Claude Code 的權限設定不開放這個執行檔。所有寫入都經過 core/admin.ts，與 Web UI 共用驗證邏輯，
+ * 並寫入 audit_log。
  */
 import { Command, Option } from 'commander';
+import { dirname, isAbsolute, relative, resolve } from 'node:path';
+import {
+  type AdminContext,
+  activateCurrentStrategy,
+  addFeeVersion,
+  allocateFunds,
+  cancelAllOrders,
+  flattenAll,
+  markHoliday,
+  pauseTrading,
+  quotesFromDaemon,
+  resetClaude,
+  resolveReconciliation,
+  resumeTrading,
+  runAdmin,
+  runReconciliation,
+  setUsageBudget,
+  transferSharesIn,
+  transferSharesOut,
+  updateRiskParams,
+  usageBudget,
+  withdrawFunds,
+} from '../core/admin.js';
 import type { RiskParams } from '../core/config.js';
-import type { DB } from '../core/db.js';
 import { CtradeError, ExitCode, invalidArgs } from '../core/errors.js';
-import { allocate, getPositions, transferIn, transferOut, withdraw } from '../core/ledger.js';
-import { valuate } from '../core/market.js';
-import { checkLedgerConsistency, recordReconciliation } from '../core/reconcile.js';
-import { scalePeaksForFlow } from '../core/risk.js';
-import { type FeeScheduleInput, addFeeSchedule, getFeeSchedule, getRiskParams, setRiskParams } from '../core/settings.js';
-import { addHoliday, audit, getPause, getState, pause, resume, setState } from '../core/state.js';
+import { getPositions } from '../core/ledger.js';
+import {
+  SECRET_PROFILES,
+  isSimulationUrl,
+  keyringStore,
+  mask,
+  maskedCredentials,
+  parseProfile,
+  readEsunIni,
+  requireCredentials,
+  resolveMarketCredentials,
+} from '../core/secrets.js';
+import { getFeeSchedule, getRiskParams } from '../core/settings.js';
+import { currentStrategy, listStrategies } from '../core/strategy.js';
+import { twDate } from '../core/time.js';
 import { DailyJobs } from '../daemon/daily.js';
 import { EsunMarketDataApi, EsunTradeApi } from '../daemon/esun/api.js';
-import { SECRET_PROFILES, isSimulationUrl, keyringStore, mask, maskedCredentials, parseProfile, readEsunIni, requireCredentials, resolveMarketCredentials } from '../core/secrets.js';
-import { dirname, isAbsolute, relative, resolve } from 'node:path';
-import { promptHidden } from './prompt.js';
-import { spawnSync } from 'node:child_process';
-import { activateStrategy, currentStrategy, listStrategies } from '../core/strategy.js';
-import { isValidDate, twDate } from '../core/time.js';
-import { call } from '../core/ipc.js';
-import { type Ctx, daemonPath, getCtx, initMode, loadQuotes, parseIntArg, parseNumberArg, parsePriceArg, parseSymbol, run } from './common.js';
+import { type Ctx, daemonPath, getCtx, initMode, parseIntArg, parseNumberArg, parsePriceArg, parseSymbol, run } from './common.js';
 import { presentFees, presentPosition } from './present.js';
+import { promptHidden } from './prompt.js';
 
 initMode();
 
-const ACTOR = 'user';
-
-/** 執行管理操作並寫入稽核記錄；失敗也記錄。 */
-function admin<T>(command: string, args: unknown, fn: (ctx: Ctx) => T | Promise<T>): Promise<void> {
-  return run(async () => {
-    const ctx = getCtx();
-    try {
-      const result = await fn(ctx);
-      audit(ctx.db, ACTOR, command, args, 'ok', ctx.clock);
-      return result;
-    } catch (e) {
-      audit(ctx.db, ACTOR, command, args, `error: ${(e as Error).message}`, ctx.clock);
-      throw e;
-    }
-  });
+/** 管理操作的共用環境；needQuotes 時向 daemon 取報價（未執行則以平均成本估值）。 */
+async function adminCtx(ctx: Ctx, needQuotes = false, extraSymbols: string[] = []): Promise<AdminContext> {
+  const ipcPath = daemonPath(ctx);
+  const quotes = needQuotes
+    ? await quotesFromDaemon(ipcPath, [...extraSymbols, ...getPositions(ctx.db).map((p) => p.symbol)])
+    : ctx.quotes;
+  return { db: ctx.db, config: ctx.config, root: ctx.root, clock: ctx.clock, quotes, ipcPath, actor: 'user' };
 }
 
-const equityOf = (ctx: Ctx) => valuate(ctx.db, ctx.quotes, ctx.config.symbols).equity;
-
-/** 資金或持股異動：前後權益比例縮放回撤高點（規格第 6 節）。 */
-function withPeakScaling<T>(ctx: Ctx, fn: (db: DB) => T): T {
-  return ctx.db.transaction(() => {
-    const before = equityOf(ctx);
-    const result = fn(ctx.db);
-    scalePeaksForFlow(ctx.db, before, equityOf(ctx), ctx.clock);
-    return result;
-  })();
-}
+/** 不經過 core/admin 的操作（金鑰、連線檢查）也寫入稽核記錄。 */
+const audited = <T>(command: string, args: unknown, fn: () => T | Promise<T>) =>
+  run(async () => runAdmin(await adminCtx(getCtx()), command, args, fn));
 
 const program = new Command('ctrade-admin')
   .description('Claude 交易系統管理 CLI（使用者與 Web UI 專用）')
@@ -70,10 +80,7 @@ program
   .requiredOption('--amount <元>', '金額')
   .option('--note <text>', '備註')
   .action((opts: { amount: string; note?: string }) =>
-    admin('allocate', opts, (ctx) => {
-      const amount = parseIntArg('--amount', opts.amount);
-      return withPeakScaling(ctx, (db) => allocate(db, amount, ACTOR, opts.note, ctx.clock));
-    }),
+    run(async () => allocateFunds(await adminCtx(getCtx(), true), { amount: parseIntArg('--amount', opts.amount), note: opts.note })),
   );
 
 program
@@ -82,10 +89,7 @@ program
   .requiredOption('--amount <元>', '金額')
   .option('--note <text>', '備註')
   .action((opts: { amount: string; note?: string }) =>
-    admin('withdraw', opts, (ctx) => {
-      const amount = parseIntArg('--amount', opts.amount);
-      return withPeakScaling(ctx, (db) => withdraw(db, amount, ACTOR, opts.note, ctx.clock));
-    }),
+    run(async () => withdrawFunds(await adminCtx(getCtx(), true), { amount: parseIntArg('--amount', opts.amount), note: opts.note })),
   );
 
 program
@@ -95,32 +99,16 @@ program
   .option('--cost <價>', '每股成本；預設為前一交易日收盤價')
   .option('--note <text>', '備註')
   .action((symbol: string, opts: { qty: string; cost?: string; note?: string }) =>
-    admin('transfer-in', { symbol, ...opts }, async (ctx) => {
+    run(async () => {
       const sym = parseSymbol(symbol);
-      const qty = parseIntArg('--qty', opts.qty);
-      // 報價用於預設成本與權益估值；daemon 未執行時 paper 模式仍可轉入（需指定 --cost）
-      try {
-        await loadQuotes(ctx, [sym, ...getPositions(ctx.db).map((p) => p.symbol)]);
-      } catch {
-        // 沒有報價時以平均成本估值
-      }
-      // 規格第 5 節：live 模式必須先向券商查詢實際持股，確認「使用者持股 − 已轉入股數」足夠
-      let brokerHeldQty: number | undefined;
-      if (ctx.config.mode === 'live') {
-        const holdings = await call<{ symbol: string; qty: number }[]>(daemonPath(ctx), 'broker_holdings', {}, 30_000);
-        brokerHeldQty = holdings.find((h) => h.symbol === sym)?.qty ?? 0;
-      }
-      let cost: number;
-      if (opts.cost !== undefined) cost = parsePriceArg(opts.cost);
-      else {
-        const prevClose = ctx.quotes.getQuote(sym)?.prev_close_x100;
-        if (!prevClose) throw invalidArgs('COST_REQUIRED', `取不到 ${sym} 前一交易日收盤價，請以 --cost 指定每股成本`);
-        cost = prevClose;
-      }
+      const actx = await adminCtx(getCtx(), true, [sym]);
       return presentPosition(
-        withPeakScaling(ctx, (db) =>
-          transferIn(db, { symbol: sym, qty, costPerShareX100: cost, brokerHeldQty, actor: ACTOR, note: opts.note }, ctx.clock),
-        ),
+        await transferSharesIn(actx, {
+          symbol: sym,
+          qty: parseIntArg('--qty', opts.qty),
+          costPerShareX100: opts.cost !== undefined ? parsePriceArg(opts.cost) : undefined,
+          note: opts.note,
+        }),
       );
     }),
   );
@@ -131,49 +119,42 @@ program
   .requiredOption('--qty <股>', '股數')
   .option('--note <text>', '備註')
   .action((symbol: string, opts: { qty: string; note?: string }) =>
-    admin('transfer-out', { symbol, ...opts }, (ctx) => {
-      const qty = parseIntArg('--qty', opts.qty);
-      return presentPosition(
-        withPeakScaling(ctx, (db) =>
-          transferOut(db, { symbol: parseSymbol(symbol), qty, actor: ACTOR, note: opts.note }, ctx.clock),
-        ),
-      );
-    }),
+    run(async () =>
+      presentPosition(
+        await transferSharesOut(await adminCtx(getCtx(), true), {
+          symbol: parseSymbol(symbol),
+          qty: parseIntArg('--qty', opts.qty),
+          note: opts.note,
+        }),
+      ),
+    ),
   );
 
-// ---------------------------------------------------------------- 暫停與恢復
+// ---------------------------------------------------------------- 暫停、恢復與緊急操作
 
 program
   .command('pause')
   .description('暫停 Claude 交易')
   .option('--reason <text>', '原因', '使用者手動暫停')
-  .action((opts: { reason: string }) =>
-    admin('pause', opts, (ctx) => {
-      pause(ctx.db, 'manual', opts.reason, ctx.clock);
-      return getPause(ctx.db);
-    }),
-  );
+  .action((opts: { reason: string }) => run(async () => pauseTrading(await adminCtx(getCtx()), opts)));
 
 program
   .command('resume')
   .description('恢復 Claude 交易；因跨日回撤暫停時必須加 --reset-peak')
   .option('--reset-peak', '以目前權益重設歷史權益高點')
-  .action((opts: { resetPeak?: boolean }) =>
-    admin('resume', opts, (ctx) => {
-      resume(ctx.db, { resetPeak: !!opts.resetPeak, currentEquity: equityOf(ctx) }, ctx.clock);
-      return getPause(ctx.db);
-    }),
-  );
+  .action((opts: { resetPeak?: boolean }) => run(async () => resumeTrading(await adminCtx(getCtx(), true), opts)));
+
+program
+  .command('cancel-all')
+  .description('緊急操作：刪除所有未完成委託並暫停（經 daemon 送出，規格第 18 節）')
+  .action(() => run(async () => cancelAllOrders(await adminCtx(getCtx()))));
+
+program
+  .command('flatten')
+  .description('緊急操作：刪除未完成委託後以對手價賣出全部持股並暫停（經 daemon 送出，規格第 18 節）')
+  .action(() => run(async () => flattenAll(await adminCtx(getCtx()))));
 
 // ---------------------------------------------------------------- 策略版本
-
-const STRATEGY_DIR = '.claude/skills/trading-strategy';
-
-function git(root: string, args: string[]): string {
-  const r = spawnSync('git', args, { cwd: root, encoding: 'utf8' });
-  if (r.status !== 0) throw new CtradeError('GIT_ERROR', `git ${args.join(' ')} 失敗：${r.stderr.trim()}`, ExitCode.INTERNAL);
-  return r.stdout.trim();
-}
 
 const strategy = program.command('strategy').description('策略版本（規格第 10 節）');
 
@@ -181,16 +162,7 @@ strategy
   .command('activate')
   .description('把目前 commit 的策略 skill 記錄為生效版本；策略檔有未 commit 的修改時拒絕')
   .option('--note <text>', '備註，例如核准原因')
-  .action((opts: { note?: string }) =>
-    admin('strategy activate', opts, (ctx) => {
-      const dirty = git(ctx.root, ['status', '--porcelain', '--', STRATEGY_DIR]);
-      if (dirty) throw invalidArgs('STRATEGY_UNCOMMITTED', `${STRATEGY_DIR} 有未 commit 的修改，請先 commit：\n${dirty}`);
-      const version = git(ctx.root, ['log', '-1', '--format=%H', '--', STRATEGY_DIR]);
-      if (!version) throw invalidArgs('STRATEGY_NOT_COMMITTED', `${STRATEGY_DIR} 尚未進版控`);
-      const subject = git(ctx.root, ['log', '-1', '--format=%s', version]);
-      return { ...activateStrategy(ctx.db, version, opts.note, ctx.clock), commit_subject: subject };
-    }),
-  );
+  .action((opts: { note?: string }) => run(async () => activateCurrentStrategy(await adminCtx(getCtx()), opts)));
 
 strategy
   .command('show')
@@ -207,7 +179,7 @@ secrets
   .requiredOption('--ini <path>', '玉山金鑰設定檔（.ini），讀取後不需保留在專案內')
   .option('--cert <path>', '.p12 憑證檔的絕對路徑；未指定時使用設定檔中的路徑')
   .action((profileArg: string, opts: { ini: string; cert?: string }) =>
-    admin('secrets import', { profile: profileArg }, async () => {
+    audited('secrets import', { profile: profileArg }, async () => {
       const profile = parseProfile(profileArg);
       const ini = readEsunIni(resolve(opts.ini));
       const sim = isSimulationUrl(ini.apiUrl) || ini.environment?.toUpperCase() === 'SIMULATION';
@@ -256,7 +228,7 @@ secrets
   .command('delete <profile>')
   .description('從金鑰管理刪除一組金鑰')
   .action((profileArg: string) =>
-    admin('secrets delete', { profile: profileArg }, async () => ({
+    audited('secrets delete', { profile: profileArg }, async () => ({
       profile: profileArg,
       deleted: await keyringStore.delete(parseProfile(profileArg)),
     })),
@@ -269,7 +241,7 @@ broker
   .description('登入並執行唯讀查詢：金鑰、憑證、交易權限、市場狀態、主機時間、庫存（第 1 階段驗收）')
   .option('--profile <profile>', 'esun-sim 或 esun-live', 'esun-live')
   .action((opts: { profile: string }) =>
-    admin('broker check', opts, async () => {
+    audited('broker check', opts, async () => {
       const profile = parseProfile(opts.profile);
       if (profile === 'esun-marketdata') throw invalidArgs('INVALID_PROFILE', '行情金鑰請用 ctrade-admin market check');
       const api = new EsunTradeApi(await requireCredentials(keyringStore, profile));
@@ -298,10 +270,14 @@ market
   .description('登入行情並取得一檔標的的參考價、漲跌停與報價（使用 esun-marketdata，沒有時改用 esun-live）')
   .option('--symbol <symbol>', '代號', '0050')
   .action((opts: { symbol: string }) =>
-    admin('market check', opts, async () => {
+    audited('market check', opts, async () => {
       const md = await resolveMarketCredentials(keyringStore);
       if (!md) {
-        throw new CtradeError('CREDENTIALS_MISSING', '金鑰管理中沒有 esun-marketdata 或 esun-live，請先以 ctrade-admin secrets import 匯入金鑰', ExitCode.BROKER_ERROR);
+        throw new CtradeError(
+          'CREDENTIALS_MISSING',
+          '金鑰管理中沒有 esun-marketdata 或 esun-live，請先以 ctrade-admin secrets import 匯入金鑰',
+          ExitCode.BROKER_ERROR,
+        );
       }
       const api = new EsunMarketDataApi(md.creds);
       await api.login();
@@ -311,24 +287,45 @@ market
       return {
         credentials: md.profile,
         login: 'ok',
-        ticker: { date: t.date, name: t.name, reference: t.referencePrice, limit_up: t.limitUpPrice, limit_down: t.limitDownPrice, board_lot: t.boardLot, status: t.securityStatus },
+        ticker: {
+          date: t.date,
+          name: t.name,
+          reference: t.referencePrice,
+          limit_up: t.limitUpPrice,
+          limit_down: t.limitDownPrice,
+          board_lot: t.boardLot,
+          status: t.securityStatus,
+        },
         quote: { last: q.lastPrice ?? q.closePrice, bid: q.bids?.[0], ask: q.asks?.[0], updated: q.lastUpdated },
       };
     }),
   );
 
-// ---------------------------------------------------------------- Claude 狀態
+// ---------------------------------------------------------------- Claude 狀態與用量預算
 
 const claude = program.command('claude').description('Claude 呼叫狀態');
 
 claude
   .command('reset')
   .description('解除 claude_unavailable（呼叫失敗或用量預算用盡後），恢復叫醒 Claude')
-  .action(() =>
-    admin('claude reset', {}, (ctx) => {
-      const before = getState(ctx.db, 'claude_unavailable');
-      setState(ctx.db, 'claude_unavailable', null, ctx.clock);
-      return { claude_unavailable: null, was: before };
+  .action(() => run(async () => resetClaude(await adminCtx(getCtx()))));
+
+const usage = program.command('usage').description('Claude 用量預算');
+
+usage
+  .command('budget')
+  .description('查看或設定每日與每週的 token 預算（覆寫設定檔）')
+  .option('--daily <tokens>', '每日預算')
+  .option('--weekly <tokens>', '每週預算')
+  .action((opts: { daily?: string; weekly?: string }) =>
+    run(async () => {
+      const ctx = getCtx();
+      const cur = usageBudget(ctx.db, ctx.config);
+      if (opts.daily === undefined && opts.weekly === undefined) return cur;
+      return setUsageBudget(await adminCtx(ctx), {
+        daily_budget_tokens: opts.daily !== undefined ? parseIntArg('--daily', opts.daily) : cur.daily_budget_tokens,
+        weekly_budget_tokens: opts.weekly !== undefined ? parseIntArg('--weekly', opts.weekly) : cur.weekly_budget_tokens,
+      });
     }),
   );
 
@@ -337,30 +334,29 @@ program
   .description('手動產生今日快照（daemon 在執行時以即時報價估值）')
   .action(() =>
     run(async () => {
-      const ctx = getCtx();
-      try {
-        await loadQuotes(ctx, getPositions(ctx.db).map((p) => p.symbol));
-      } catch {
-        // daemon 未執行時以平均成本估值
-      }
-      new DailyJobs(ctx.db, ctx.config, ctx.root, ctx.clock, ctx.quotes, () => {}).snapshot();
-      audit(ctx.db, ACTOR, 'snapshot', {}, 'ok', ctx.clock);
-      return ctx.db.prepare('SELECT * FROM daily_snapshots ORDER BY date DESC LIMIT 1').get();
+      const actx = await adminCtx(getCtx(), true);
+      return runAdmin(actx, 'snapshot', {}, () => {
+        new DailyJobs(actx.db, actx.config, actx.root, actx.clock, actx.quotes, () => {}).snapshot();
+        return actx.db.prepare('SELECT * FROM daily_snapshots ORDER BY date DESC LIMIT 1').get();
+      });
     }),
   );
 
 // ---------------------------------------------------------------- 對帳
 
-program
-  .command('reconcile')
-  .description('手動執行對帳（目前為帳本內部一致性檢查）')
-  .action(() =>
-    admin('reconcile', {}, (ctx) => {
-      const diffs = checkLedgerConsistency(ctx.db);
-      const status = recordReconciliation(ctx.db, diffs, ctx.clock);
-      if (status === 'error') pause(ctx.db, 'reconciliation', '對帳出現差異', ctx.clock);
-      return { status, diffs };
-    }),
+const reconcile = program.command('reconcile').description('對帳（目前為帳本內部一致性檢查）');
+
+reconcile
+  .command('run', { isDefault: true })
+  .description('手動執行對帳；出現差異時暫停')
+  .action(() => run(async () => runReconciliation(await adminCtx(getCtx()))));
+
+reconcile
+  .command('resolve <id>')
+  .description('標記一筆對帳差異已處理')
+  .requiredOption('--note <text>', '處理說明')
+  .action((id: string, opts: { note: string }) =>
+    run(async () => resolveReconciliation(await adminCtx(getCtx()), { id: parseIntArg('id', id), note: opts.note })),
   );
 
 // ---------------------------------------------------------------- 風控參數
@@ -376,7 +372,8 @@ risk
   .command('set <assignments...>')
   .description('修改風控參數，例如 risk set max_order_amount=20000 symbols_allowlist=0050,00631L')
   .action((assignments: string[]) =>
-    admin('risk set', assignments, (ctx) => {
+    run(async () => {
+      const ctx = getCtx();
       const current = getRiskParams(ctx.db);
       const patch: Record<string, unknown> = {};
       for (const a of assignments) {
@@ -392,13 +389,12 @@ risk
         } else if (key === 'symbols_allowlist') {
           patch[key] = raw === '' ? [] : raw.split(',').map(parseSymbol);
         } else if (Array.isArray(prev)) {
-          const parts = raw.split(',').map((v) => parseNumberArg(key, v));
-          patch[key] = parts;
+          patch[key] = raw.split(',').map((v) => parseNumberArg(key, v));
         } else {
           patch[key] = parseNumberArg(key, raw);
         }
       }
-      return setRiskParams(ctx.db, patch as Partial<RiskParams>, ctx.clock);
+      return updateRiskParams(await adminCtx(ctx), patch as Partial<RiskParams>);
     }),
   );
 
@@ -436,21 +432,25 @@ fees
   .option('--tax-daytrade <pct>', '現股當沖證交稅（%）')
   .option('--tax-etf <pct>', 'ETF 證交稅（%）')
   .action((opts: Record<string, string>) =>
-    admin('fees set', opts, (ctx) => {
-      const effective = opts.effective ?? '';
-      const cur = presentFees(getFeeSchedule(ctx.db, effective));
-      const num = (key: string, fallback: number) => (opts[key] !== undefined ? parseNumberArg(key, opts[key]) : fallback);
-      const input: FeeScheduleInput = {
-        fee_rate_pct: num('feeRate', cur.fee_rate_pct),
-        fee_discount: num('discount', cur.fee_discount),
-        rebate_mode: (opts.rebateMode ?? cur.rebate_mode) as FeeScheduleInput['rebate_mode'],
-        min_fee_regular: num('minFeeRegular', cur.min_fee_regular),
-        min_fee_odd: num('minFeeOdd', cur.min_fee_odd),
-        tax_stock_pct: num('taxStock', cur.tax_stock_pct),
-        tax_daytrade_pct: num('taxDaytrade', cur.tax_daytrade_pct),
-        tax_etf_pct: num('taxEtf', cur.tax_etf_pct),
-      };
-      return presentFees(addFeeSchedule(ctx.db, input, effective, ctx.clock));
+    run(async () => {
+      const num = (key: string) => (opts[key] !== undefined ? parseNumberArg(key, opts[key]!) : undefined);
+      const rebate = opts.rebateMode;
+      if (rebate !== undefined && rebate !== 'instant' && rebate !== 'monthly') {
+        throw invalidArgs('INVALID_ARGS', '--rebate-mode 必須是 instant 或 monthly');
+      }
+      return presentFees(
+        await addFeeVersion(await adminCtx(getCtx()), {
+          effective: opts.effective ?? '',
+          fee_rate_pct: num('feeRate'),
+          fee_discount: num('discount'),
+          rebate_mode: rebate as 'instant' | 'monthly' | undefined,
+          min_fee_regular: num('minFeeRegular'),
+          min_fee_odd: num('minFeeOdd'),
+          tax_stock_pct: num('taxStock'),
+          tax_daytrade_pct: num('taxDaytrade'),
+          tax_etf_pct: num('taxEtf'),
+        }),
+      );
     }),
   );
 
@@ -462,13 +462,7 @@ holiday
   .command('add <date>')
   .description('標記臨時休市（例如颱風停市）')
   .option('--reason <text>', '原因')
-  .action((date: string, opts: { reason?: string }) =>
-    admin('holiday add', { date, ...opts }, (ctx) => {
-      if (!isValidDate(date)) throw invalidArgs('INVALID_DATE', `日期 ${date} 格式錯誤，須為 YYYY-MM-DD`);
-      addHoliday(ctx.db, date, opts.reason ?? null);
-      return { date, reason: opts.reason ?? null };
-    }),
-  );
+  .action((date: string, opts: { reason?: string }) => run(async () => markHoliday(await adminCtx(getCtx()), { date, reason: opts.reason })));
 
 program
   .command('positions')
@@ -480,7 +474,8 @@ try {
 } catch (e) {
   const err = e as { code?: string };
   if (err.code === 'commander.helpDisplayed' || err.code === 'commander.version') process.exitCode = 0;
-  else await run(() => {
-    throw e;
-  });
+  else
+    await run(() => {
+      throw e;
+    });
 }

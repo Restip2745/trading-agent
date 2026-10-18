@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { usageBudget } from '../core/admin.js';
 import { setTriggerConfig } from '../core/claude-ops.js';
 import type { Config } from '../core/config.js';
 import type { DB } from '../core/db.js';
@@ -163,7 +164,8 @@ export class DailyJobs {
         .get(since) as number;
     const daily = sum(twDayStartIso(now));
     const weekly = sum(toTwIso(new Date(now.getTime() - 7 * 24 * 3600_000)));
-    const { daily_budget_tokens: dBudget, weekly_budget_tokens: wBudget } = this.config.usage;
+    // 使用者在 Web UI 設定的自訂預算優先於設定檔
+    const { daily_budget_tokens: dBudget, weekly_budget_tokens: wBudget } = usageBudget(this.db, this.config);
 
     if (daily >= dBudget) return { ok: false, reason: `budget_daily：今日已用 ${daily} tokens，達每日預算 ${dBudget}` };
     if (weekly >= wBudget) return { ok: false, reason: `budget_weekly：近 7 日已用 ${weekly} tokens，達每週預算 ${wBudget}` };

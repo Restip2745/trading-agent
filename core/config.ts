@@ -70,6 +70,7 @@ export interface Config {
   model: { intraday: string; review: string };
   claude: { bin: string; timeout_min: number; max_budget_usd: number; extra_args: string[] };
   stops: { order_ticks: number; resend_interval_sec: number };
+  web?: { port: number };
   usage: { daily_budget_tokens: number; weekly_budget_tokens: number };
 }
 

@@ -16,3 +16,6 @@ backup/
 config*.ini
 config/local.toml
 .env*
+
+# 本機預覽設定（含本機暫存路徑）
+.claude/launch.json

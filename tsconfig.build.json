@@ -1,4 +1,4 @@
 {
   "extends": "./tsconfig.json",
-  "include": ["core", "cli", "daemon"]
+  "include": ["core", "cli", "daemon", "web/*.ts"]
 }
