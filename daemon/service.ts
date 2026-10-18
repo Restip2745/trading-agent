@@ -61,6 +61,7 @@ export class Daemon {
   private readonly expiredOn = new Map<Session, string>();
   private readonly log: (msg: string) => void;
   private stopsRunning = false;
+  private readonly barsCache = new Map<string, unknown>();
 
   constructor(private readonly opts: DaemonOptions) {
     const { config, db, clock, root } = opts;
@@ -256,6 +257,25 @@ export class Daemon {
           throw new CtradeError('BROKER_UNSUPPORTED', `送單轉接層 ${this.broker.name} 不提供券商庫存`, ExitCode.BROKER_ERROR);
         }
         return this.broker.holdings();
+      }
+      case 'bars': {
+        if (!this.opts.feed.bars) {
+          throw new CtradeError('FEED_UNSUPPORTED', `行情來源 ${this.opts.feed.name} 不提供歷史 K 線`, ExitCode.BROKER_ERROR);
+        }
+        const symbol = String(p.symbol);
+        const interval = p.interval === 'D' ? 'D' : '5m';
+        const from = String(p.from);
+        const to = String(p.to);
+        // 過去的 K 線不會再變，快取到當天結束；含今天的區間不快取
+        const today = twDate(this.opts.clock.now());
+        const key = `${today}|${symbol}|${interval}|${from}|${to}`;
+        if (to < today && this.barsCache.has(key)) return this.barsCache.get(key);
+        const bars = await this.opts.feed.bars(symbol, interval, from, to);
+        if (to < today) {
+          for (const k of this.barsCache.keys()) if (!k.startsWith(`${today}|`)) this.barsCache.delete(k);
+          this.barsCache.set(key, bars);
+        }
+        return bars;
       }
       case 'candles': {
         if (!this.opts.feed.candles) {

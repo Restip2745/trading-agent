@@ -246,7 +246,8 @@ export interface MarketDataApi {
   ticker(symbol: string): Promise<Record<string, any>>;
   quote(symbol: string, oddlot: boolean): Promise<Record<string, any>>;
   intradayCandles(symbol: string, timeframe: string): Promise<Record<string, any>>;
-  historicalCandles(symbol: string, from: string, to: string): Promise<Record<string, any>>;
+  /** timeframe：D 日 K（預設）、5 為 5 分 K 等；單次跨度須小於一年 */
+  historicalCandles(symbol: string, from: string, to: string, timeframe?: string): Promise<Record<string, any>>;
   /** 每次呼叫建立一條新的 WebSocket（上限 2 條：整股一條、零股一條） */
   websocket(): WsLike;
 }
@@ -297,9 +298,11 @@ export class EsunMarketDataApi implements MarketDataApi {
     return checkPayload(await this.rest.intraday.candles({ symbol, timeframe }), `candles ${symbol}`);
   }
 
-  async historicalCandles(symbol: string, from: string, to: string) {
-    // from 是保留字，只能用物件傳入（evalis 實測）
-    return checkPayload(await this.rest.historical.candles({ symbol, from, to, timeframe: 'D' }), `historical ${symbol}`);
+  async historicalCandles(symbol: string, from: string, to: string, timeframe = 'D') {
+    // from 是保留字，只能用物件傳入（evalis 實測）；非交易日區段回 404，視為沒有資料
+    const r = await this.rest.historical.candles({ symbol, from, to, timeframe });
+    if (r && r.statusCode === 404) return { data: [] };
+    return checkPayload(r, `historical ${symbol}`);
   }
 
   websocket(): WsLike {

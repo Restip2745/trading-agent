@@ -1,3 +1,4 @@
+import type { Bar as IndicatorBar } from '../../core/indicators.js';
 import type { Board, BookEvent, Level, MarketEvent, TickerEvent, TradeEvent } from '../../core/marketdata.js';
 import { type Clock, addDays, toTwIso, twDate } from '../../core/time.js';
 import type { MarketFeed } from '../feeds.js';
@@ -212,6 +213,20 @@ export class EsunMarketFeed implements MarketFeed {
   }
 
   // ---------------------------------------------------------------- K 線
+
+  async bars(symbol: string, interval: 'D' | '5m', from: string, to: string): Promise<IndicatorBar[]> {
+    const today = twDate(this.opts.clock.now());
+    const norm = (rows: any[]): IndicatorBar[] =>
+      rows
+        .map((r) => ({ date: String(r.date), open: Number(r.open), high: Number(r.high), low: Number(r.low), close: Number(r.close), volume: Number(r.volume) }))
+        .sort((a, b) => a.date.localeCompare(b.date));
+    if (interval === 'D') return norm((await this.api.historicalCandles(symbol, from, to < today ? to : addDays(today, -1), 'D')).data ?? []);
+    const out: IndicatorBar[] = [];
+    const pastTo = to < today ? to : addDays(today, -1);
+    if (from <= pastTo) out.push(...norm((await this.api.historicalCandles(symbol, from, pastTo, '5')).data ?? []));
+    if (to >= today) out.push(...norm((await this.api.intradayCandles(symbol, '5')).data ?? []).filter((b) => b.date.startsWith(today)));
+    return out;
+  }
 
   async candles(symbol: string, interval: string, count: number): Promise<unknown[]> {
     const tf = /^(\d+)m$/.exec(interval)?.[1];

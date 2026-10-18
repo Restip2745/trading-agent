@@ -16,7 +16,8 @@ import { type OrderRow, createOrder, listFills, listOrders, markRejected, reques
 import { getFeeSchedule, getMarketRules, getRiskParams } from '../core/settings.js';
 import { proposalEligibility, reviewData, submitReview } from '../core/review.js';
 import { buildStatus } from '../core/status.js';
-import { isValidDate, twDate } from '../core/time.js';
+import { addDays, isValidDate, toTwIso, twDate } from '../core/time.js';
+import { type Bar as IndicatorBar, dailyIndicators, intradayIndicators } from '../core/indicators.js';
 import { daemonPath, getCtx, initMode, loadQuotes, parseIntArg, parseNumberArg, parsePriceArg, parseSymbol, run } from './common.js';
 import {
   presentFees,
@@ -142,6 +143,73 @@ program
         interval: opts.interval,
         count: parseIntArg('--count', opts.count),
       });
+    }),
+  );
+
+// ---------------------------------------------------------------- 技術指標
+
+const round = (v: number | null | undefined, d = 2) => (v === null || v === undefined || !Number.isFinite(v) ? null : Number(v.toFixed(d)));
+
+program
+  .command('indicators <symbol>')
+  .description('技術指標：日線均線（不含今天、昨日、含今天）、RSI、ATR、近 20 日高低，盤中 VWAP、偏離、日高低、止跌 K 線與量比')
+  .option('--sma <periods>', '日線均線週期，逗號分隔', '20,60')
+  .action((symbolArg: string, opts: { sma: string }) =>
+    run(async () => {
+      const c = getCtx();
+      const symbol = parseSymbol(symbolArg);
+      const periods = opts.sma.split(',').map((v) => parseIntArg('--sma', v));
+      if (periods.some((n) => n < 2 || n > 240)) throw invalidArgs('INVALID_ARGS', '--sma 週期須介於 2 至 240');
+      const now = c.clock.now();
+      const today = twDate(now);
+      const path = daemonPath(c);
+      await loadQuotes(c, [symbol]);
+      const last = c.quotes.getQuote(symbol)?.last_x100;
+      const lastPrice = last === undefined ? null : last / 100;
+
+      // 日 K：取足夠計算最長週期的「昨日」均線；5 分 K：今天，以及近 20 個交易日（約 40 個日曆日）
+      const maxN = Math.max(...periods, 20);
+      const [daily, todayBars, pastBars] = await Promise.all([
+        call<IndicatorBar[]>(path, 'bars', { symbol, interval: 'D', from: addDays(today, -Math.ceil(maxN * 1.6) - 30), to: addDays(today, -1) }, 30_000),
+        call<IndicatorBar[]>(path, 'bars', { symbol, interval: '5m', from: today, to: today }, 30_000),
+        call<IndicatorBar[]>(path, 'bars', { symbol, interval: '5m', from: addDays(today, -40), to: addDays(today, -1) }, 30_000),
+      ]);
+      const d = dailyIndicators(daily, lastPrice, periods);
+      const i = intradayIndicators(todayBars, pastBars, lastPrice, now);
+      const sma = Object.fromEntries(
+        Object.entries(d.sma).map(([n, v]) => [n, { value: round(v.value), prev_day: round(v.prev_day), including_today: round(v.including_today) }]),
+      );
+      const bar = (b: IndicatorBar | null) => b && { start: b.date, open: b.open, high: b.high, low: b.low, close: b.close, volume_lots: b.volume };
+      return {
+        symbol,
+        as_of: toTwIso(now),
+        last_price: lastPrice,
+        daily: {
+          prev_date: d.prev_date,
+          prev_close: d.prev_close,
+          sma,
+          rsi14: round(d.rsi14),
+          atr14: round(d.atr14, 3),
+          high20: d.high20,
+          low20: d.low20,
+          note: '日 K 不含今天；including_today 以最後成交價代入今天的收盤',
+        },
+        intraday: {
+          bars_completed: i.bars_completed,
+          vwap: round(i.vwap, 3),
+          below_vwap_pct: round(i.below_vwap_pct === null ? null : i.below_vwap_pct * 100, 3),
+          day_high: i.day_high,
+          day_low: i.day_low,
+          above_day_low_pct: round(i.above_day_low_pct === null ? null : i.above_day_low_pct * 100, 3),
+          last_bar: i.last_bar && { ...bar(i.last_bar), volume_vs_avg: round(i.last_bar.volume_vs_avg, 2), close_above_prev_close: i.last_bar.close_above_prev_close },
+          prev_bar: bar(i.prev_bar),
+          avg_bar_lots: round(i.avg_bar_lots, 1),
+          today_lots: i.today_lots,
+          avg20_daily_lots: round(i.avg20_daily_lots, 0),
+          today_vs_avg20: round(i.today_vs_avg20, 3),
+          note: '只計已收完的 5 分 K；VWAP 以典型價格（高＋低＋收）/3 依量加權（與回測相同）；量的單位為張；百分比欄位單位為 %',
+        },
+      };
     }),
   );
 

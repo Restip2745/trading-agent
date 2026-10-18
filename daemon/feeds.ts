@@ -1,9 +1,10 @@
 import { readFileSync } from 'node:fs';
+import type { Bar as IndicatorBar } from '../core/indicators.js';
 import type { MarketEvent } from '../core/marketdata.js';
 import { toTwIso } from '../core/time.js';
 
 /**
- * 行情來源。daemon 只認這個介面：玉山 SDK 的轉接層（待 SDK 放進 vendor/ 後實作）、
+ * 行情來源。daemon 只認這個介面：玉山行情（daemon/esun/feed.ts）、
  * 錄製檔重播、測試用的手動推送，都實作同一個介面。
  */
 export interface MarketFeed {
@@ -13,6 +14,11 @@ export interface MarketFeed {
   /** 行情來源訂閱這些代號；重播與手動來源忽略。 */
   subscribe?(symbols: string[]): Promise<void>;
   candles?(symbol: string, interval: string, count: number): Promise<unknown[]>;
+  /**
+   * 原始 K 線（給 ctrade indicators 計算指標）：interval 為 D（日 K）或 5m（5 分 K）。
+   * 5m 且區間含今天時，今天的部分取自日內 K 線。
+   */
+  bars?(symbol: string, interval: 'D' | '5m', from: string, to: string): Promise<IndicatorBar[]>;
 }
 
 /** 沒有行情來源時使用：daemon 仍可提供帳本查詢與刪單，但沒有報價就無法下單。 */

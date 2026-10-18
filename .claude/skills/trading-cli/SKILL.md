@@ -60,9 +60,31 @@ description: 交易工作階段操作系統的方法：ctrade 各指令的用途
 | `ctrade orders [--open] [--date YYYY-MM-DD]` | 委託列表 |
 | `ctrade fills [--date YYYY-MM-DD]` | 成交列表 |
 | `ctrade fees` | 費率、稅率與市場規則，用來估算交易成本 |
+| `ctrade indicators <代號> [--sma 20,60]` | 技術指標，見下方「技術指標」；策略要求的數值一律從這裡取，不要自己從 K 線手算 |
 | `ctrade history --days 20` | 每日快照 |
 | `ctrade trigger show` | 目前觸發條件與允許範圍 |
 | `ctrade stop show` | 硬停損停利價 |
+
+### 技術指標（`ctrade indicators`）
+
+計算方式與回測腳本共用同一份程式（`core/indicators.ts`），所以照策略引用的數值，就是回測驗證過的定義。
+
+| 欄位 | 定義 |
+| --- | --- |
+| `daily.prev_close` | 最近一根日 K（不含今天）的收盤 |
+| `daily.sma.<n>.value` | 最近 n 根日 K 收盤的平均（不含今天）＝昨日的 MA |
+| `daily.sma.<n>.prev_day` | 前一天的 MA（再往前一根） |
+| `daily.sma.<n>.including_today` | 前 n−1 根收盤加上目前最後成交價的平均＝「若現在收盤」的 MA |
+| `daily.rsi14`、`daily.atr14` | RSI、ATR（Wilder 平滑，14 日） |
+| `daily.high20`、`daily.low20` | 近 20 日最高、最低（不含今天） |
+| `intraday.vwap` | 今天已收完的 5 分 K，以典型價格（高＋低＋收）/3 依量加權 |
+| `intraday.below_vwap_pct` | (VWAP − 最後成交價) ÷ VWAP，單位 %；正值代表低於均價 |
+| `intraday.day_low`、`day_high` | 今天的最低、最高價 |
+| `intraday.above_day_low_pct` | 最後成交價相對當日最低的漲幅，單位 % |
+| `intraday.last_bar` | 最近一根**已收完**的 5 分 K；`close_above_prev_close` 為收盤是否高於前一根收盤，`volume_vs_avg` 為量相對今天已收完 5 分 K 的平均 |
+| `intraday.today_lots`、`avg20_daily_lots`、`today_vs_avg20` | 今天已收完 5 分 K 的量、近 20 個交易日每日平均量（皆為張）、兩者比值 |
+
+開盤前或非交易日，`intraday` 的欄位為 null。
 
 ### 下單與刪單
 

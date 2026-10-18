@@ -16,6 +16,7 @@
  */
 import { keyringStore, resolveMarketCredentials } from '../core/secrets.js';
 import { EsunMarketDataApi } from '../daemon/esun/api.js';
+import { sma, smaIncludingToday, vwap } from '../core/indicators.js';
 
 const arg = (name: string, fallback: string) => {
   const i = process.argv.indexOf(`--${name}`);
@@ -157,15 +158,13 @@ function simulate(mode: Mode, o: Opts = { exit: 'ma20slope', seed: false }) {
     const bars = intraday.get(day)!;
     const prior = priorDaily(day);
     const closes = prior.map((b) => b.close);
-    const ma20 = mean(closes.slice(-20));
-    const ma60 = mean(closes.slice(-60));
-    const ma20Prev = mean(closes.slice(-21, -1));
+    // 與 ctrade indicators 共用 core/indicators.ts 的定義
+    const ma20 = sma(closes, 20)!;
+    const ma60 = sma(closes, 60)!;
     const prevClose = closes.at(-1)!;
     const regime = prevClose >= ma60 && ma20 >= ma60 ? '多頭' : prevClose < ma60 && ma20 < ma60 ? '空頭' : '中性';
     const vol20 = avgLots20(day);
 
-    let pv = 0;
-    let vsum = 0;
     let low = Infinity;
     let dayVol = 0;
     let entriesToday = 0;
@@ -175,11 +174,9 @@ function simulate(mode: Mode, o: Opts = { exit: 'ma20slope', seed: false }) {
     for (let i = 0; i < bars.length; i++) {
       const b = bars[i]!;
       const t = b.date.slice(11, 16);
-      pv += ((b.high + b.low + b.close) / 3) * b.volume;
-      vsum += b.volume;
       dayVol += b.volume;
       low = Math.min(low, b.low);
-      const vwap = pv / vsum;
+      const vwapNow = vwap(bars.slice(0, i + 1))!;
 
       // 硬停損：距平均成本 −8%；開盤跳空低於停損以開盤價成交（買進持有基準不設停損）
       if (qty > 0 && mode !== 'hold') {
@@ -205,9 +202,9 @@ function simulate(mode: Mode, o: Opts = { exit: 'ma20slope', seed: false }) {
         entriesToday++;
       } else if (regime !== '空頭' && t >= '09:30' && t <= '13:10' && entriesToday < 1 && allocated < equityNow * (MAX_ALLOC - TRANCHE / 2) && i > 0) {
         const prev = bars[i - 1]!;
-        const dev = (vwap - b.close) / vwap;
+        const dev = (vwapNow - b.close) / vwapNow;
         const reversal = b.close > prev.close && b.close >= low * 1.002;
-        const avgBarVol = vsum / (i + 1);
+        const avgBarVol = mean(bars.slice(0, i + 1).map((x) => x.volume));
         const volumeOk = mode !== 'pullback-volume' || b.volume >= avgBarVol;
         if (dev >= 0.005 && reversal && volumeOk) {
           buyTo(b.close, Math.min(equityNow * MAX_ALLOC, allocated + equityNow * TRANCHE * (regime === '中性' ? 0.5 : 1)));
@@ -218,11 +215,11 @@ function simulate(mode: Mode, o: Opts = { exit: 'ma20slope', seed: false }) {
       // 13:20 出場判斷（以 13:15 那根收盤代表）
       if (t === '13:15' && qty > 0) {
         const px = b.close;
-        const ma20Today = mean([...closes.slice(-19), px]);
-        const ma60Today = mean([...closes.slice(-59), px]);
+        const ma20Today = smaIncludingToday(closes, px, 20)!;
+        const ma60Today = smaIncludingToday(closes, px, 60)!;
         const trendBroken =
           px < ma60Today ||
-          (o.exit === 'ma20slope' && px < ma20Today && ma20Today < ma20Prev) ||
+          (o.exit === 'ma20slope' && px < ma20Today && ma20Today < ma20) ||
           (o.exit === 'ma20x2' && px < ma20Today && belowMa20Yesterday);
         if (trendBroken) sell(px, qty);
         else if (mode === 'pullback-volume') {
@@ -309,14 +306,12 @@ function simulateCoreSatellite(coreAlloc = 0.6, satAlloc = 0.3) {
     const bars = intraday.get(day)!;
     const prior = priorDaily(day);
     const closes = prior.map((b) => b.close);
-    const ma20 = mean(closes.slice(-20));
-    const ma60 = mean(closes.slice(-60));
-    const ma20Prev = mean(closes.slice(-21, -1));
+    // 與 ctrade indicators 共用 core/indicators.ts 的定義
+    const ma20 = sma(closes, 20)!;
+    const ma60 = sma(closes, 60)!;
     const prevClose = closes.at(-1)!;
     const regime = prevClose >= ma60 && ma20 >= ma60 ? '多頭' : prevClose < ma60 && ma20 < ma60 ? '空頭' : '中性';
     const vol20 = avgLots20(day);
-    let pv = 0;
-    let vsum = 0;
     let low = Infinity;
     let dayVol = 0;
     let satEntered = false;
@@ -325,11 +320,9 @@ function simulateCoreSatellite(coreAlloc = 0.6, satAlloc = 0.3) {
     for (let i = 0; i < bars.length; i++) {
       const b = bars[i]!;
       const t = b.date.slice(11, 16);
-      pv += ((b.high + b.low + b.close) / 3) * b.volume;
-      vsum += b.volume;
       dayVol += b.volume;
       low = Math.min(low, b.low);
-      const vwap = pv / vsum;
+      const vwapNow = vwap(bars.slice(0, i + 1))!;
       const equityNow = cash + (sleeves.core.qty + sleeves.sat.qty) * b.close;
 
       for (const sl of ['core', 'sat'] as const) {
@@ -340,8 +333,8 @@ function simulateCoreSatellite(coreAlloc = 0.6, satAlloc = 0.3) {
       // 衛星進場：拉回 + 止跌 + 量
       if (regime !== '空頭' && !satEntered && sleeves.sat.qty === 0 && t >= '09:30' && t <= '13:10' && i > 0) {
         const prev = bars[i - 1]!;
-        const dev = (vwap - b.close) / vwap;
-        if (dev >= 0.005 && b.close > prev.close && b.close >= low * 1.002 && b.volume >= vsum / (i + 1)) {
+        const dev = (vwapNow - b.close) / vwapNow;
+        if (dev >= 0.005 && b.close > prev.close && b.close >= low * 1.002 && b.volume >= mean(bars.slice(0, i + 1).map((x) => x.volume))) {
           buy('sat', b.close, equityNow * satAlloc * (regime === '中性' ? 0.5 : 1));
           satEntered = true;
         }
@@ -349,8 +342,8 @@ function simulateCoreSatellite(coreAlloc = 0.6, satAlloc = 0.3) {
 
       if (t === '13:15') {
         const px = b.close;
-        const ma20Today = mean([...closes.slice(-19), px]);
-        const ma60Today = mean([...closes.slice(-59), px]);
+        const ma20Today = smaIncludingToday(closes, px, 20)!;
+        const ma60Today = smaIncludingToday(closes, px, 60)!;
         // 核心
         if (sleeves.core.qty > 0 && px < ma60Today) sell('core', px, sleeves.core.qty);
         else if (regime === '多頭' && px >= ma60Today && sleeves.core.qty * px < equityNow * (coreAlloc - 0.15)) {
@@ -359,7 +352,8 @@ function simulateCoreSatellite(coreAlloc = 0.6, satAlloc = 0.3) {
         // 衛星
         if (sleeves.sat.qty > 0) {
           const heavyDown = px / prevClose - 1 <= -0.015 && dayVol >= vol20 * 1.5 * 0.95;
-          const weak = (px < ma20Today && ma20Today < ma20Prev) || px < ma60Today;
+          // MA20 下彎：含今天的 MA20 低於昨日的 MA20（與策略 SKILL.md 的定義一致）
+          const weak = (px < ma20Today && ma20Today < ma20) || px < ma60Today;
           if (heavyDown || weak) sell('sat', px, sleeves.sat.qty);
         }
       }
