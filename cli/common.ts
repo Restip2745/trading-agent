@@ -5,7 +5,9 @@ import { CtradeError, ExitCode, internalError, invalidArgs } from '../core/error
 import { call, ipcPath } from '../core/ipc.js';
 import { type Quote, type QuoteSource, staticQuotes } from '../core/market.js';
 import { parsePrice } from '../core/money.js';
-import { type Clock, fixedClock, systemClock } from '../core/time.js';
+import { indicatorsReport } from '../core/indicator-catalog.js';
+import { type Bar, dailyIndicators, intradayIndicators } from '../core/indicators.js';
+import { type Clock, addDays, fixedClock, systemClock, toTwIso, twDate } from '../core/time.js';
 
 /**
  * ctrade 與 ctrade-admin 共用：載入設定、開啟帳本、統一輸出格式與結束碼（規格第 5 節）。
@@ -53,9 +55,32 @@ export function daemonPath(c: Ctx): string {
 }
 
 /** 向 daemon 取報價並放進 ctx，之後的風控與估值都用這份報價。 */
-export async function loadQuotes(c: Ctx, symbols: string[]): Promise<void> {
-  const quotes = await call<Quote[]>(daemonPath(c), 'quotes', { symbols: [...new Set(symbols)] }, 5_000);
+export async function loadQuotes(c: Ctx, symbols: string[], timeoutMs = 5_000): Promise<void> {
+  const quotes = await call<Quote[]>(daemonPath(c), 'quotes', { symbols: [...new Set(symbols)] }, timeoutMs);
   c.quotes = staticQuotes(quotes);
+}
+
+/**
+ * ctrade indicators 的資料：報價與 K 線都向 daemon 取，計算與回測共用 core/indicators.ts。
+ * journal add 的指標快照也走這裡，確保快照與 agent 用 ctrade indicators 看到的是同一份定義。
+ * timeoutMs 套用在每一個 daemon 呼叫（同時送出），預設報價 5 秒、K 線 30 秒。
+ */
+export async function fetchIndicators(c: Ctx, symbol: string, periods: number[], timeoutMs?: number) {
+  const now = c.clock.now();
+  const today = twDate(now);
+  const path = daemonPath(c);
+  const barsMs = timeoutMs ?? 30_000;
+  // 日 K：取足夠計算最長週期的「昨日」均線；5 分 K：今天，以及近 20 個交易日（約 40 個日曆日）
+  const maxN = Math.max(...periods, 20);
+  const [, daily, todayBars, pastBars] = await Promise.all([
+    loadQuotes(c, [symbol], timeoutMs),
+    call<Bar[]>(path, 'bars', { symbol, interval: 'D', from: addDays(today, -Math.ceil(maxN * 1.6) - 30), to: addDays(today, -1) }, barsMs),
+    call<Bar[]>(path, 'bars', { symbol, interval: '5m', from: today, to: today }, barsMs),
+    call<Bar[]>(path, 'bars', { symbol, interval: '5m', from: addDays(today, -40), to: addDays(today, -1) }, barsMs),
+  ]);
+  const last = c.quotes.getQuote(symbol)?.last_x100;
+  const lastPrice = last === undefined ? null : last / 100;
+  return indicatorsReport(symbol, toTwIso(now), lastPrice, dailyIndicators(daily, lastPrice, periods), intradayIndicators(todayBars, pastBars, lastPrice, now));
 }
 
 export function emit(data: unknown): void {

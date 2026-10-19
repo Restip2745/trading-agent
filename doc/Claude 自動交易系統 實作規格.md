@@ -188,7 +188,7 @@ CLI 分成兩個執行檔：`ctrade` 給 Claude 使用，`ctrade-admin` 只給�
 | `ctrade stop set <代號> [--stop <價>] [--take-profit <價>]` | 設定硬停損停利價；停損價只能上調（見第 6 節） |
 | `ctrade trigger show` | 目前觸發條件與允許範圍 |
 | `ctrade trigger set [--interval <分\|off>] [--up <%> --down <%> \| --price off]` | 設定下一輪觸發條件，超出範圍時拒絕並回報允許範圍（見第 8 節） |
-| `ctrade journal add --reasoning <文字> --actions <摘要>` | 寫入本次決策記錄，每次觸發結束前必須呼叫 |
+| `ctrade journal add --reasoning <文字> --actions <摘要>` | 寫入本次決策記錄，每次觸發結束前必須呼叫；寫入後另向 daemon 取主要標的的指標快照存在決策上，取不到時決策照常寫入、快照留空 |
 | `ctrade history --days <天>` | 每日快照、已實現損益、交易次數 |
 | `ctrade review-data --date <日期>` | 復盤用的當日完整資料：觸發、決策、委託、成交、損益 |
 | `ctrade review submit --date <日期> --file <筆記路徑> [--proposal-branch <分支>]` | 寫入 `reviews` 資料表；附分支時狀態為 `proposed`，否則為 `observed`（見第 10 節） |

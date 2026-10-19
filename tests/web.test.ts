@@ -208,3 +208,27 @@ describe('策略頁', () => {
     expect(html).toContain('<ol><li>一<ul><li>子項</li></ul></li><li>二</li></ol>');
   });
 });
+
+describe('決策日誌的指標快照', () => {
+  it('回傳決策當下的快照；取不到時回傳原因；舊的決策兩者皆為 null', async () => {
+    const db = new Database(join(dir, 'paper.db'));
+    const insert = db.prepare('INSERT INTO decisions (ts, reasoning, actions_json, indicators_json, indicators_error) VALUES (?, ?, ?, ?, ?)');
+    const snap = { symbol: '0050', as_of: '2026-10-19T10:00:00.000+08:00', last_price: 110.5, intraday: { vwap: 110.9, below_vwap_pct: 0.361 } };
+    insert.run('2026-10-19T09:00:00.000+08:00', '舊的決策', '"不動作"', null, null);
+    insert.run('2026-10-19T09:30:00.000+08:00', 'daemon 未執行', '"不動作"', null, 'DAEMON_UNAVAILABLE：無法連線到 daemon');
+    insert.run('2026-10-19T10:00:00.000+08:00', '有快照', '"不動作"', JSON.stringify(snap), null);
+    db.close();
+
+    const rows = (await get('/api/decisions?date=2026-10-19')).json().data as Record<string, unknown>[];
+    const by = (reasoning: string) => rows.find((r) => r.reasoning === reasoning);
+    expect(by('有快照')).toMatchObject({ indicators: snap, indicators_error: null });
+    expect(by('daemon 未執行')).toMatchObject({ indicators: null, indicators_error: expect.stringMatching(/^DAEMON_UNAVAILABLE/) });
+    expect(by('舊的決策')).toMatchObject({ indicators: null, indicators_error: null });
+    expect(by('有快照')).not.toHaveProperty('indicators_json');
+  });
+
+  it('指標欄位目錄', async () => {
+    const data = (await get('/api/indicators/fields')).json().data;
+    expect(data.fields.map((f: { path: string }) => f.path)).toContain('intraday.last_bar.volume_vs_avg');
+  });
+});

@@ -153,6 +153,8 @@ ctrade journal add --reasoning "<為什麼這樣決定，引用看到的數據>"
 
 每次觸發結束前必須呼叫一次。理由要具體，復盤時會用來判斷這次決策有沒有照策略走。
 
+寫入決策後，ctrade 會另外向 daemon 取一份主要標的的 `ctrade indicators` 數值存在這筆決策上（最多等 5 秒），供復盤與 Web UI 對照。輸出的 `indicators_snapshot` 為 `saved` 或 `unavailable`；`unavailable` 只代表快照沒存到，決策本身已經寫入（`decision_id`），不要重複呼叫。
+
 ### 復盤（收盤後的工作階段）
 
 | 指令 | 說明 |

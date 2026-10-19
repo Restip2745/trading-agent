@@ -264,23 +264,28 @@ export async function buildServer(o: WebOptions): Promise<{ app: FastifyInstance
     const rows = db
       .prepare(
         `SELECT d.id, d.ts, d.model, d.reasoning, d.actions_json, d.next_trigger_json, d.strategy_version,
-                d.trigger_event_id, t.kind, t.detail_json
+                d.indicators_json, d.indicators_error, d.trigger_event_id, t.kind, t.detail_json
          FROM decisions d LEFT JOIN trigger_events t ON t.id = d.trigger_event_id
          ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY d.id DESC LIMIT 200`,
       )
       .all(...params) as Record<string, unknown>[];
     const summary = decisionOrderSummary(db, rows.map((r) => Number(r.id)));
     return ok(
-      rows.map((r) => ({
+      rows.map(({ indicators_json, ...r }) => ({
         ...r,
         ...summary.get(Number(r.id)),
         actions: safeJson(r.actions_json),
         next_trigger: safeJson(r.next_trigger_json),
         trigger_detail: safeJson(r.detail_json),
+        // 決策當下的 ctrade indicators 輸出；舊的決策與取不到時為 null
+        indicators: safeJson(indicators_json),
         has_log: r.trigger_event_id ? existsSync(logPath(String(r.ts).slice(0, 10), Number(r.trigger_event_id))) : false,
       })),
     );
   });
+
+  /** 指標欄位目錄（決策日誌展開指標快照時對照欄位說明與單位）。 */
+  app.get('/api/indicators/fields', async () => ok({ default_sma_periods: DEFAULT_SMA_PERIODS, fields: INDICATOR_FIELDS, notes: INDICATOR_NOTES }));
 
   /**
    * 決策日誌的盤勢圖：一天的 5 分 K 與當天的決策、成交、停損停利、觸發帶、等效曝險。

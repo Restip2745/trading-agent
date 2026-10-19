@@ -785,10 +785,73 @@ const Orders = {
     </template>`,
 };
 
+// ---------------------------------------------------------------- 決策當下的指標快照
+
+/** 欄位目錄只取一次，給所有決策卡片共用 */
+let indicatorFields;
+const loadIndicatorFields = () => (indicatorFields ??= get('indicators/fields').then((d) => d.fields).catch(() => (indicatorFields = undefined, [])));
+
+/** 把快照攤平成「路徑 → 值」，均線週期的路徑對應到目錄的 <n> */
+function flattenSnapshot(obj, prefix = '') {
+  return Object.entries(obj ?? {}).flatMap(([k, v]) => {
+    const path = prefix ? `${prefix}.${k}` : k;
+    return v !== null && typeof v === 'object' && !Array.isArray(v) ? flattenSnapshot(v, path) : [{ path, value: v }];
+  });
+}
+
+const IndicatorSnapshot = {
+  props: { snapshot: Object, error: String },
+  setup(props) {
+    const open = ref(false);
+    const fields = ref([]);
+    const num = (v, d = 2) => (v === null || v === undefined ? '-' : Number(v).toFixed(d));
+    const s = computed(() => props.snapshot);
+    const smaPeriods = computed(() => Object.keys(s.value?.daily?.sma ?? {}).sort((a, b) => a - b));
+    // 策略會用到的關鍵值（trading-strategy skill「指標」一節）
+    const vwapText = computed(() => {
+      const i = s.value?.intraday;
+      if (!i || i.vwap === null) return null;
+      const b = i.below_vwap_pct;
+      return { vwap: num(i.vwap, 2), dev: b === null ? '' : b >= 0 ? `低於 ${num(b, 2)}%` : `高於 ${num(-b, 2)}%`, below: b };
+    });
+    const lastBar = computed(() => s.value?.intraday?.last_bar ?? null);
+    const toggle = async () => {
+      open.value = !open.value;
+      if (open.value && !fields.value.length) fields.value = await loadIndicatorFields();
+    };
+    const rows = computed(() => {
+      const byPath = new Map(fields.value.map((f) => [f.path, f]));
+      return flattenSnapshot(s.value).map((r) => {
+        const f = byPath.get(r.path.replace(/\.sma\.\d+\./, '.sma.<n>.'));
+        return { ...r, unit: f?.unit ?? '', description: f?.description ?? '' };
+      });
+    });
+    const show = (v) => (v === null || v === undefined ? '-' : typeof v === 'boolean' ? (v ? 'true' : 'false') : String(v));
+    return { open, toggle, rows, show, num, s, smaPeriods, vwapText, lastBar, hhmm };
+  },
+  template: `
+    <div class="snapshot" v-if="snapshot">
+      <div class="kv">
+        <span><b>{{ s.symbol }}</b> {{ num(s.last_price) }} <span class="muted">@{{ hhmm(s.as_of) }}</span></span>
+        <span v-if="vwapText">VWAP {{ vwapText.vwap }} <span :class="vwapText.below >= 0.5 ? 'hit' : 'muted'">{{ vwapText.dev }}</span></span>
+        <span v-else class="muted">VWAP -（盤中資料未就緒）</span>
+        <span v-if="lastBar">5 分 K {{ hhmm(lastBar.start) }} 量比 <span :class="lastBar.volume_vs_avg >= 1 ? 'hit' : ''">{{ num(lastBar.volume_vs_avg) }}</span> 倍<template v-if="lastBar.close_above_prev_close !== null">・收盤{{ lastBar.close_above_prev_close ? '高於' : '低於' }}前一根</template></span>
+        <span v-for="n in smaPeriods" :key="n">MA{{ n }} {{ num(s.daily.sma[n].value) }} <span class="muted">今 {{ num(s.daily.sma[n].including_today) }}</span></span>
+        <span v-if="s.intraday?.today_vs_avg20 !== null && s.intraday?.today_vs_avg20 !== undefined">今日量 {{ num(s.intraday.today_vs_avg20) }} 倍 20 日均</span>
+        <span v-if="s.daily?.rsi14 !== null">RSI14 {{ num(s.daily.rsi14, 1) }}</span>
+        <button class="small" @click="toggle">{{ open ? '收起指標快照' : '完整指標快照' }}</button>
+      </div>
+      <table class="snapshot-table" v-if="open">
+        <tr v-for="r in rows" :key="r.path"><td class="mono">{{ r.path }}</td><td class="num mono">{{ show(r.value) }}</td><td class="muted">{{ r.unit }}</td><td class="muted">{{ r.description }}</td></tr>
+      </table>
+    </div>
+    <div class="muted snapshot-missing" v-else-if="error">沒有指標快照：{{ error }}</div>`,
+};
+
 // ---------------------------------------------------------------- 頁面：決策日誌
 
 const Decisions = {
-  components: { DayChart },
+  components: { DayChart, IndicatorSnapshot },
   setup() {
     const date = ref('');
     const kind = ref('');
@@ -896,6 +959,7 @@ const Decisions = {
           <span class="muted mono" v-if="d.model">{{ d.model }}</span>
         </div>
         <div><strong>動作：</strong>{{ d.actions }}</div>
+        <IndicatorSnapshot :snapshot="d.indicators" :error="d.indicators_error" />
         <div class="pre">{{ d.reasoning }}</div>
         <div class="muted" v-if="d.next_trigger">下一輪觸發：定時 {{ d.next_trigger.interval_min ?? '關' }} 分、漲 {{ d.next_trigger.up_pct ?? '關' }}%、跌 {{ d.next_trigger.down_pct ?? '關' }}%</div>
         <button class="small" @click="showOnChart(d)">在盤勢圖標示</button>

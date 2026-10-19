@@ -190,6 +190,12 @@ textarea { width: 100%; min-height: 70px; }
 
 .decision { border-bottom: 1px solid var(--border); padding: 12px 0; }
 .decision .head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 6px; }
+.snapshot { margin: 6px 0; }
+.snapshot .kv { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: center; font-size: 13px; font-variant-numeric: tabular-nums; padding: 6px 10px; background: var(--accent-soft); border-radius: 6px; }
+.snapshot .kv .hit { color: var(--accent); font-weight: 600; }
+.snapshot-table { margin-top: 6px; font-size: 12px; border-collapse: collapse; width: 100%; }
+.snapshot-table td { padding: 2px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.snapshot-missing { font-size: 12px; margin: 4px 0; }
 .steps { margin-top: 8px; border-left: 3px solid var(--border); padding-left: 10px; }
 .steps .step { margin: 6px 0; }
 .steps .step.tool { font-family: var(--mono); font-size: 12px; color: var(--accent); }

@@ -116,6 +116,18 @@ export function addJournal(db: DB, input: JournalInput, clock: Clock): number {
   return Number(info.lastInsertRowid);
 }
 
+/**
+ * 補上決策當下的指標快照（ctrade indicators 的輸出）。決策已經先寫入，
+ * 這裡失敗不影響決策記錄本身；取不到快照時只記原因。
+ */
+export function attachIndicatorSnapshot(db: DB, decisionId: number, snapshot: { indicators: unknown } | { error: string }): void {
+  db.prepare('UPDATE decisions SET indicators_json = ?, indicators_error = ? WHERE id = ?').run(
+    'indicators' in snapshot ? JSON.stringify(snapshot.indicators) : null,
+    'error' in snapshot ? snapshot.error : null,
+    decisionId,
+  );
+}
+
 // ---------------------------------------------------------------- 硬停損停利（規格第 6 節）
 
 export interface ProtectiveStop {

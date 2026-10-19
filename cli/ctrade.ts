@@ -5,8 +5,10 @@
  * 不提供 --mode 之類的參數，模式只由設定檔決定。
  * CTRADE_READONLY=1（復盤模式）時拒絕所有會改變交易狀態的指令。
  */
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { Command, Option } from 'commander';
-import { addJournal, getStops, getTriggerConfig, setStop, setTriggerConfig, type TriggerPatch } from '../core/claude-ops.js';
+import { addJournal, attachIndicatorSnapshot, getStops, getTriggerConfig, setStop, setTriggerConfig, type TriggerPatch } from '../core/claude-ops.js';
 import type { Session } from '../core/config.js';
 import { CtradeError, ExitCode, invalidArgs } from '../core/errors.js';
 import { call } from '../core/ipc.js';
@@ -17,10 +19,11 @@ import { type OrderRow, createOrder, listFills, listOrders, markRejected, reques
 import { getFeeSchedule, getMarketRules, getRiskParams } from '../core/settings.js';
 import { proposalEligibility, reviewData, submitReview } from '../core/review.js';
 import { buildStatus } from '../core/status.js';
-import { addDays, isValidDate, toTwIso, twDate } from '../core/time.js';
-import { DEFAULT_SMA_PERIODS, INDICATOR_FIELDS, INDICATOR_NOTES, indicatorsReport } from '../core/indicator-catalog.js';
-import { type Bar as IndicatorBar, dailyIndicators, intradayIndicators } from '../core/indicators.js';
-import { daemonPath, getCtx, initMode, loadQuotes, parseIntArg, parseNumberArg, parsePriceArg, parseSymbol, run } from './common.js';
+import { isValidDate, toTwIso, twDate } from '../core/time.js';
+import { DEFAULT_SMA_PERIODS, INDICATOR_FIELDS, INDICATOR_NOTES, checkIndicatorRefs } from '../core/indicator-catalog.js';
+import { defaultChartSymbol } from '../core/chart.js';
+import { STRATEGY_DIR } from '../core/strategy.js';
+import { type Ctx, daemonPath, fetchIndicators, getCtx, initMode, loadQuotes, parseIntArg, parseNumberArg, parsePriceArg, parseSymbol, run } from './common.js';
 import {
   presentFees,
   presentFill,
@@ -173,21 +176,7 @@ program
       const symbol = parseSymbol(symbolArg);
       const periods = opts.sma.split(',').map((v) => parseIntArg('--sma', v));
       if (periods.some((n) => n < 2 || n > 240)) throw invalidArgs('INVALID_ARGS', '--sma 週期須介於 2 至 240');
-      const now = c.clock.now();
-      const today = twDate(now);
-      const path = daemonPath(c);
-      await loadQuotes(c, [symbol]);
-      const last = c.quotes.getQuote(symbol)?.last_x100;
-      const lastPrice = last === undefined ? null : last / 100;
-
-      // 日 K：取足夠計算最長週期的「昨日」均線；5 分 K：今天，以及近 20 個交易日（約 40 個日曆日）
-      const maxN = Math.max(...periods, 20);
-      const [daily, todayBars, pastBars] = await Promise.all([
-        call<IndicatorBar[]>(path, 'bars', { symbol, interval: 'D', from: addDays(today, -Math.ceil(maxN * 1.6) - 30), to: addDays(today, -1) }, 30_000),
-        call<IndicatorBar[]>(path, 'bars', { symbol, interval: '5m', from: today, to: today }, 30_000),
-        call<IndicatorBar[]>(path, 'bars', { symbol, interval: '5m', from: addDays(today, -40), to: addDays(today, -1) }, 30_000),
-      ]);
-      return indicatorsReport(symbol, toTwIso(now), lastPrice, dailyIndicators(daily, lastPrice, periods), intradayIndicators(todayBars, pastBars, lastPrice, now));
+      return fetchIndicators(c, symbol, periods);
     }),
   );
 
@@ -365,11 +354,12 @@ journal
   .requiredOption('--actions <text>', '採取的動作摘要，沒有動作時寫「不動作」')
   .option('--trigger-event <id>', '觸發事件編號（daemon 會以 CTRADE_TRIGGER_EVENT_ID 提供）')
   .action((opts: { reasoning: string; actions: string; triggerEvent?: string }) =>
-    run(() => {
-      const { db, clock } = getCtx();
+    run(async () => {
+      const c = getCtx();
       const triggerRaw = opts.triggerEvent ?? process.env.CTRADE_TRIGGER_EVENT_ID;
+      // 先寫入決策，再補指標快照：快照取不到或逾時都不影響決策記錄（交易原則第 4 條）
       const id = addJournal(
-        db,
+        c.db,
         {
           reasoning: opts.reasoning,
           actions: opts.actions,
@@ -377,11 +367,41 @@ journal
           model: process.env.CTRADE_MODEL,
           strategyVersion: process.env.CTRADE_STRATEGY_VERSION,
         },
-        clock,
+        c.clock,
       );
-      return { decision_id: id };
+      return { decision_id: id, indicators_snapshot: await snapshotIndicators(c, id) };
     }),
   );
+
+/** 決策當下的指標快照逾時（每個 daemon 呼叫同時送出，所以也是整體的上限）。 */
+const SNAPSHOT_TIMEOUT_MS = 5_000;
+
+/**
+ * 以 ctrade indicators 相同的計算取主要標的（槓桿 1 倍）的指標，存進剛寫入的決策。
+ * 均線週期為預設值加上策略檔以 --sma 要求的週期。任何錯誤都只記下原因，不往外丟。
+ */
+async function snapshotIndicators(c: Ctx, decisionId: number): Promise<'saved' | 'unavailable'> {
+  let snapshot: { indicators: unknown } | { error: string };
+  try {
+    const periods = new Set(DEFAULT_SMA_PERIODS);
+    try {
+      const strategy = readFileSync(join(c.root, STRATEGY_DIR, 'SKILL.md'), 'utf8');
+      for (const n of checkIndicatorRefs(strategy).requested_periods) if (Number.isInteger(n) && n >= 2 && n <= 240) periods.add(n);
+    } catch {
+      // 沒有策略檔時用預設週期
+    }
+    const { notes: _notes, ...indicators } = await fetchIndicators(c, defaultChartSymbol(c.config), [...periods].sort((a, b) => a - b), SNAPSHOT_TIMEOUT_MS);
+    snapshot = { indicators };
+  } catch (e) {
+    snapshot = { error: e instanceof CtradeError ? `${e.code}：${e.message}` : String((e as Error)?.message ?? e) };
+  }
+  try {
+    attachIndicatorSnapshot(c.db, decisionId, snapshot);
+    return 'indicators' in snapshot ? 'saved' : 'unavailable';
+  } catch {
+    return 'unavailable';
+  }
+}
 
 // ---------------------------------------------------------------- 硬停損停利
 
