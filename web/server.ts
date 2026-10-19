@@ -5,6 +5,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as admin from '../core/admin.js';
+import { type DayBars, type FetchBars, buildDayChart, decisionOrderSummary, defaultChartSymbol, involvedSymbols, loadDayBars } from '../core/chart.js';
 import { getStops, getTriggerConfig } from '../core/claude-ops.js';
 import type { Config, Mode, RiskParams } from '../core/config.js';
 import { type DB, openDb } from '../core/db.js';
@@ -18,12 +19,14 @@ import { getFeeSchedule, getMarketRules, getRiskParams } from '../core/settings.
 import { getPause, getState } from '../core/state.js';
 import { buildStatus } from '../core/status.js';
 import { DEFAULT_SMA_PERIODS, INDICATOR_FIELDS, INDICATOR_NOTES, checkIndicatorRefs } from '../core/indicator-catalog.js';
+import type { Bar } from '../core/indicators.js';
 import { STRATEGY_DIR, checkStrategyFiles, git, listStrategies, strategyDiff, strategyFilesAt } from '../core/strategy.js';
 import { type Clock, isValidDate, twDate, twDayStartIso } from '../core/time.js';
 
 /**
  * Web UI 後端（規格第 11 節）。只綁定 127.0.0.1，讀取 SQLite 呈現 dashboard；
  * 所有寫入都呼叫 core/admin.ts（與 ctrade-admin 相同的函式庫），不直接寫 SQL。
+ * 例外是盤勢圖的 K 線快取（core/chart.ts 的 bar_cache），那是市場資料，不屬於帳本。
  *
  * 安全：
  *   - Host 標頭必須是 127.0.0.1 或 localhost 加上本服務的埠號，擋下 DNS rebinding。
@@ -266,15 +269,42 @@ export async function buildServer(o: WebOptions): Promise<{ app: FastifyInstance
          ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY d.id DESC LIMIT 200`,
       )
       .all(...params) as Record<string, unknown>[];
+    const summary = decisionOrderSummary(db, rows.map((r) => Number(r.id)));
     return ok(
       rows.map((r) => ({
         ...r,
+        ...summary.get(Number(r.id)),
         actions: safeJson(r.actions_json),
         next_trigger: safeJson(r.next_trigger_json),
         trigger_detail: safeJson(r.detail_json),
         has_log: r.trigger_event_id ? existsSync(logPath(String(r.ts).slice(0, 10), Number(r.trigger_event_id))) : false,
       })),
     );
+  });
+
+  /**
+   * 決策日誌的盤勢圖：一天的 5 分 K 與當天的決策、成交、停損停利、觸發帶、等效曝險。
+   * K 線向 daemon 取（行情是市場資料，不分 paper／live），過去的交易日快取在目前模式的資料庫。
+   */
+  app.get('/api/chart/day', async (req) => {
+    const { db } = viewDb(req);
+    const today = twDate(o.clock.now());
+    const date = dateQuery(req) ?? today;
+    if (date > today) throw invalidArgs('INVALID_DATE', `日期 ${date} 還沒到`);
+    const raw = (req.query as { symbol?: string }).symbol;
+    const symbol = raw ? symbolArg(raw) : defaultChartSymbol(o.config);
+    const fetch: FetchBars = (s, d) => call<Bar[]>(o.ipcPath, 'bars', { symbol: s, interval: '5m', from: d, to: d }, 30_000);
+    const loaded = new Map<string, DayBars>();
+    for (const s of [symbol, ...involvedSymbols(db, date)]) {
+      if (!loaded.has(s)) loaded.set(s, await loadDayBars(views.active, s, date, o.clock, fetch));
+    }
+    const base = loaded.get(symbol)!;
+    return ok({
+      ...buildDayChart(db, o.config, date, symbol, new Map([...loaded].map(([s, b]) => [s, b.bars]))),
+      bars_source: base.source,
+      bars_error: base.error ?? null,
+      symbols: Object.entries(o.config.symbols).map(([s, c]) => ({ symbol: s, name: c.name, leverage: c.leverage })),
+    });
   });
 
   const logPath = (date: string, id: number) => join(o.root, 'logs', 'claude', date, `${id}.jsonl`);

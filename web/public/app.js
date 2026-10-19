@@ -146,6 +146,7 @@ const STATUS = {
   unknown: '結果不明',
 };
 const SESSION = { regular: '整股', odd_intraday: '盤中零股', odd_after: '盤後零股' };
+const DECISION_ACTION = { buy: '買入', sell: '賣出', both: '買賣', none: '不動作' };
 const CASH_TYPE = {
   allocate_in: '撥入',
   allocate_out: '撥出',
@@ -248,6 +249,346 @@ const BarChart = {
       <text v-if="bars.length" class="axis" :x="bars[0].x" :y="H - 4">{{ bars[0].label }}</text>
       <text v-if="bars.length > 1" class="axis" :x="bars[bars.length - 1].x" :y="H - 4" text-anchor="end">{{ bars[bars.length - 1].label }}</text>
     </svg>`,
+};
+
+/**
+ * 決策日誌的盤勢圖（內嵌 SVG）：一天的 5 分 K、VWAP、停損停利、價格觸發帶、決策與成交點，下方是量與等效曝險。
+ * 時間軸是 09:00–13:30，左右各留一段給盤前（08:00 起）與盤後（到 15:00）的決策與成交。
+ * 選取一筆決策時，之後的 K 棒淡化：區分「決策當時已知」與「之後才發生」。
+ * 其他標的（槓桿、反向）的成交點畫在基準標的的同一時間、以空心標記，實際成交價放在說明裡。
+ */
+const DayChart = {
+  props: { chart: Object, selectedId: Number },
+  emits: ['select'],
+  setup(props, { emit }) {
+    const el = ref(null);
+    const width = ref(900);
+    let ro;
+    onMounted(() => {
+      ro = new ResizeObserver(([e]) => (width.value = Math.max(300, Math.round(e.contentRect.width))));
+      ro.observe(el.value);
+    });
+    onUnmounted(() => ro?.disconnect());
+    const hover = ref(null);
+
+    const OPEN = 540;
+    const CLOSE = 810;
+    const G = 44; // 盤前、盤後區寬度
+    const PL = 8;
+    const PR = 70;
+    const laneH = 24;
+    const priceTop = laneH;
+    const priceBot = priceTop + 230;
+    const volTop = priceBot + 10;
+    const volBot = volTop + 52;
+    const expTop = volBot + 14;
+    const expBot = expTop + 80;
+    const H = expBot + 22;
+
+    const minutes = (iso) => {
+      const [h, m, s] = iso.slice(11, 19).split(':').map(Number);
+      return h * 60 + m + (s || 0) / 60;
+    };
+    const clamp01 = (v) => Math.min(1, Math.max(0, v));
+    const leverageLabel = (lev) => (lev === 1 ? '' : `${lev}x`);
+
+    const geo = computed(() => {
+      const c = props.chart;
+      if (!c) return null;
+      const W = width.value;
+      const S = W - PL - PR - 2 * G;
+      const x0 = PL;
+      const xEnd = W - PR;
+      const xm = (m) => {
+        if (m < OPEN) return x0 + G * clamp01((m - 480) / 60);
+        if (m <= CLOSE) return x0 + G + ((m - OPEN) * S) / (CLOSE - OPEN);
+        return x0 + G + S + G * clamp01((m - CLOSE) / 90);
+      };
+      const x = (iso) => (iso.slice(0, 10) < c.date ? x0 : xm(minutes(iso)));
+      const bw = Math.max(1.5, (S / 54) * 0.62);
+
+      const bars = c.bars;
+      const lev = Object.fromEntries(c.symbols.map((s) => [s.symbol, s.leverage]));
+      const selected = c.decisions.find((d) => d.id === props.selectedId);
+      const cut = selected ? Date.parse(selected.ts) : Infinity;
+      const isFuture = (b) => Date.parse(b.date) >= cut;
+
+      // ---- 價格座標
+      const baseFills = c.fills.filter((f) => f.symbol === c.symbol);
+      const vals = [...bars.flatMap((b) => [b.high, b.low]), ...c.vwap.filter((v) => v !== null), ...baseFills.map((f) => f.price)];
+      let y = null;
+      let priceTicks = [];
+      const clampY = (v) => {
+        const raw = y(v);
+        if (raw < priceTop + 2) return { y: priceTop + 2, out: '↑' };
+        if (raw > priceBot - 2) return { y: priceBot - 2, out: '↓' };
+        return { y: raw, out: '' };
+      };
+      if (vals.length) {
+        let lo = Math.min(...vals);
+        let hi = Math.max(...vals);
+        if (hi === lo) (hi += 0.5), (lo -= 0.5);
+        const pad = (hi - lo) * 0.08;
+        lo -= pad;
+        hi += pad;
+        y = (v) => priceTop + ((hi - v) * (priceBot - priceTop)) / (hi - lo);
+        priceTicks = [0.1, 0.4, 0.7, 0.95].map((f) => lo + (hi - lo) * f).map((v) => ({ y: y(v), text: v.toFixed(2) }));
+      }
+      const barCenter = (b) => xm(minutes(b.date) + 2.5);
+
+      const candles = y
+        ? bars.map((b, i) => ({
+            i,
+            x: barCenter(b),
+            up: b.close >= b.open,
+            future: isFuture(b),
+            hiY: y(b.high),
+            loY: y(b.low),
+            top: y(Math.max(b.open, b.close)),
+            h: Math.max(1, Math.abs(y(b.open) - y(b.close))),
+          }))
+        : [];
+      const vwap = y
+        ? bars
+            .map((b, i) => (c.vwap[i] === null ? null : `${barCenter(b).toFixed(1)},${y(c.vwap[i]).toFixed(1)}`))
+            .filter(Boolean)
+            .join(' ')
+        : '';
+
+      // ---- 停損停利、觸發帶（階梯線，最後一段標價格）
+      const steps = (series, key, label, cls) => {
+        if (!y) return [];
+        const out = [];
+        series.forEach((s, i) => {
+          const v = s[key];
+          if (v === null || v === undefined) return;
+          const x1 = x(s.ts);
+          const x2 = i + 1 < series.length ? x(series[i + 1].ts) : xEnd;
+          if (x2 <= x1) return;
+          out.push({ x1, x2, ...clampY(v), v, cls, label });
+        });
+        if (out.length) out[out.length - 1].last = true;
+        return out;
+      };
+      const levels = [
+        ...steps(c.triggers, 'upper', '觸發上緣', 'trig'),
+        ...steps(c.triggers, 'lower', '觸發下緣', 'trig'),
+        ...steps(c.stops, 'take_profit', '停利', 'tp'),
+        ...steps(c.stops, 'stop', '停損', 'sl'),
+      ];
+      // 右側標籤由上而下排開，避免重疊；與標籤太近的價格刻度不顯示
+      let prevY = -Infinity;
+      for (const l of levels.filter((l) => l.last).sort((a, b) => a.y - b.y)) {
+        l.labelY = Math.max(l.y + 4, prevY + 12);
+        prevY = l.labelY;
+      }
+      const labelYs = levels.filter((l) => l.last).map((l) => l.labelY);
+      priceTicks = priceTicks.filter((t) => labelYs.every((ly) => Math.abs(t.y + 4 - ly) >= 11));
+
+      // ---- 成交點：基準標的畫在成交價；其他標的畫在基準標的同一時間的價位
+      const baseAt = (ts) => {
+        const t = Date.parse(ts);
+        let b = bars[0];
+        for (const bar of bars) if (Date.parse(bar.date) <= t) b = bar;
+        return b?.close;
+      };
+      const fills = y
+        ? c.fills
+            .map((f) => {
+              const own = f.symbol === c.symbol;
+              const p = own ? f.price : baseAt(f.ts);
+              if (p === undefined) return null;
+              const cx = x(f.ts);
+              const { y: py } = clampY(p);
+              const buy = f.side === 'buy';
+              const path = buy
+                ? `M${cx},${py + 3} L${cx - 5},${py + 12} L${cx + 5},${py + 12} Z`
+                : `M${cx},${py - 3} L${cx - 5},${py - 12} L${cx + 5},${py - 12} Z`;
+              return {
+                id: f.id,
+                path,
+                own,
+                buy,
+                future: Date.parse(f.ts) > cut,
+                label: own ? '' : leverageLabel(lev[f.symbol] ?? 1) || f.symbol,
+                lx: cx + 7,
+                ly: buy ? py + 12 : py - 5,
+                title: `${hhmm(f.ts)} ${f.symbol} ${f.side === 'buy' ? '買進' : '賣出'} ${nf.format(f.qty)} 股 @ ${f.price.toFixed(2)}（${SESSION[f.session] ?? f.session}${f.origin === 'claude' ? '' : `，${f.origin === 'stop' ? '停損停利' : '緊急'}`}）`,
+              };
+            })
+            .filter(Boolean)
+        : [];
+
+      // ---- 量
+      const maxVol = Math.max(1, ...bars.map((b) => b.volume));
+      const vols = bars.map((b) => {
+        const h = ((volBot - volTop) * b.volume) / maxVol;
+        return { x: barCenter(b) - bw / 2, y: volBot - h, h, up: b.close >= b.open, future: isFuture(b) };
+      });
+
+      // ---- 等效曝險：依標的堆疊（正值往上、負值往下），粗線為淨曝險
+      const syms = c.exposure_symbols.map((s) => s.symbol);
+      let expo = null;
+      if (c.exposure.length && syms.length) {
+        const stacked = c.exposure.map((p) => {
+          let pos = 0;
+          let neg = 0;
+          const layers = syms.map((s) => {
+            const v = p.parts.find((q) => q.symbol === s)?.pct ?? 0;
+            if (v >= 0) return [pos, (pos += v)];
+            return [neg, (neg += v)];
+          });
+          return { x: x(p.t), layers, pos, neg };
+        });
+        const maxPos = Math.max(0, ...stacked.map((s) => s.pos));
+        const minNeg = Math.min(0, ...stacked.map((s) => s.neg));
+        const span = Math.max(0.2, maxPos, -minNeg) * 1.1;
+        const top = maxPos > 0 || minNeg === 0 ? span : 0;
+        const bottom = minNeg < 0 ? -span : 0;
+        const ye = (v) => expTop + ((top - v) * (expBot - expTop)) / (top - bottom || 1);
+        const areas = syms.map((s, k) => {
+          const upper = stacked.map((p) => `${p.x.toFixed(1)},${ye(p.layers[k][1]).toFixed(1)}`);
+          const lower = stacked.map((p) => `${p.x.toFixed(1)},${ye(p.layers[k][0]).toFixed(1)}`).reverse();
+          return { symbol: s, k, points: [...upper, ...lower].join(' ') };
+        });
+        const net = c.exposure
+          .map((p) => (p.net_pct === null ? null : `${x(p.t).toFixed(1)},${ye(p.net_pct).toFixed(1)}`))
+          .filter(Boolean)
+          .join(' ');
+        const ticks = [top, 0, bottom].filter((v, i, a) => a.indexOf(v) === i).map((v) => ({ y: ye(v), text: pct(v, 0) }));
+        expo = { areas, net, ticks, zero: ye(0) };
+      }
+
+      // ---- 決策點
+      // 形狀依委託方向：▲ 買入、▼ 賣出、◆ 買賣都有、○ 不動作；有下單但沒有成交時為空心
+      const cy = laneH / 2 - 1;
+      const markPath = (action, cx, s) => {
+        if (action === 'buy') return `M${cx},${cy - s} L${cx + s},${cy + s * 0.8} L${cx - s},${cy + s * 0.8} Z`;
+        if (action === 'sell') return `M${cx},${cy + s} L${cx + s},${cy - s * 0.8} L${cx - s},${cy - s * 0.8} Z`;
+        if (action === 'both') return `M${cx},${cy - s} L${cx + s},${cy} L${cx},${cy + s} L${cx - s},${cy} Z`;
+        const r = s * 0.7;
+        return `M${cx - r},${cy} a${r},${r} 0 1,0 ${2 * r},0 a${r},${r} 0 1,0 ${-2 * r},0`;
+      };
+      const decisions = c.decisions.map((d) => {
+        const cx = x(d.ts);
+        const selected = d.id === props.selectedId;
+        const unfilled = d.action !== 'none' && !d.filled;
+        return {
+          ...d,
+          cx,
+          cy,
+          selected,
+          unfilled,
+          path: markPath(d.action, cx, selected ? 8 : 6.5),
+          title: `${hhmm(d.ts)} ${KIND[d.kind] ?? d.kind ?? '手動'}・${DECISION_ACTION[d.action]}${d.orders ? `（${d.orders} 筆委託${unfilled ? '，未成交' : ''}）` : ''}：${d.actions}`,
+        };
+      });
+
+      const hours = [540, 600, 660, 720, 780, 810]
+        .map((m) => ({ x: xm(m), text: `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}` }))
+        .reduce((kept, h) => (kept.length && h.x - kept[kept.length - 1].x < 30 ? kept : [...kept, h]), []); // 窄螢幕上太近的時間省略
+      return {
+        W, x0, xEnd, S, bw, candles, vwap, levels, fills, vols, expo, decisions, hours, priceTicks, selected,
+        selX: selected ? x(selected.ts) : null,
+        hoverX: hover.value !== null && candles[hover.value] ? candles[hover.value].x : null,
+        gutters: [
+          { x: x0, text: '盤前' },
+          { x: x0 + G + S, text: '盤後' },
+        ],
+        cutLabel: selected && bars.some(isFuture) ? { x: Math.min(x(selected.ts) + 4, xEnd - 60) } : null,
+      };
+    });
+
+    const onMove = (e) => {
+      const g = geo.value;
+      if (!g || !g.candles.length) return;
+      const px = e.clientX - e.currentTarget.getBoundingClientRect().left;
+      let best = 0;
+      g.candles.forEach((c, i) => {
+        if (Math.abs(c.x - px) < Math.abs(g.candles[best].x - px)) best = i;
+      });
+      hover.value = best;
+    };
+
+    /** 圖上方的數值列：滑鼠所在的 K 棒（沒有時為最後一根）與當時的曝險。 */
+    const readout = computed(() => {
+      const c = props.chart;
+      if (!c?.bars.length) return null;
+      const i = hover.value ?? c.bars.length - 1;
+      const b = c.bars[i];
+      if (!b) return null;
+      const e = c.exposure[i];
+      return {
+        time: hhmm(b.date),
+        ohlc: `開 ${b.open.toFixed(2)}　高 ${b.high.toFixed(2)}　低 ${b.low.toFixed(2)}　收 ${b.close.toFixed(2)}`,
+        vol: `量 ${nf.format(b.volume)} 張`,
+        vwap: c.vwap[i] === null ? '' : `VWAP ${c.vwap[i].toFixed(2)}`,
+        expo: e ? `等效曝險 ${pct(e.net_pct, 1)}（權益 ${money(e.equity)}）` : '',
+      };
+    });
+
+    return { el, geo, H, laneH, priceTop, priceBot, volTop, volBot, expTop, expBot, G, readout, hover, onMove, emit };
+  },
+  template: `
+    <div ref="el" class="daychart-wrap">
+      <div class="readout mono" v-if="readout">
+        <strong>{{ readout.time }}</strong><span>{{ readout.ohlc }}</span><span>{{ readout.vol }}</span>
+        <span class="vwap-text" v-if="readout.vwap">{{ readout.vwap }}</span><span v-if="readout.expo">{{ readout.expo }}</span>
+      </div>
+      <svg v-if="geo" class="daychart" :viewBox="'0 0 ' + geo.W + ' ' + H" :style="{ height: H + 'px' }" role="img" aria-label="當日盤勢圖"
+           @mousemove="onMove" @mouseleave="hover = null">
+        <g v-for="g in geo.gutters"><rect class="gutter" :x="g.x" :y="0" :width="G" :height="expBot" /><text class="axis" :x="g.x + G / 2" :y="priceBot - 6" text-anchor="middle">{{ g.text }}</text></g>
+        <g v-for="t in geo.priceTicks"><line class="grid" :x1="geo.x0" :x2="geo.xEnd" :y1="t.y" :y2="t.y" /><text class="axis" :x="geo.xEnd + 6" :y="t.y + 4">{{ t.text }}</text></g>
+        <g v-for="h in geo.hours"><line class="grid faint" :x1="h.x" :x2="h.x" :y1="priceTop" :y2="expBot" /><text class="axis" :x="h.x" :y="H - 6" text-anchor="middle">{{ h.text }}</text></g>
+        <text v-if="!geo.candles.length" class="axis" :x="(geo.x0 + geo.xEnd) / 2" :y="(priceTop + priceBot) / 2" text-anchor="middle">沒有 K 線</text>
+
+        <g v-for="l in geo.levels" :class="['level', l.cls]">
+          <line :x1="l.x1" :x2="l.x2" :y1="l.y" :y2="l.y"><title>{{ l.label }} {{ l.v.toFixed(2) }}</title></line>
+          <text v-if="l.last" class="level-text" :x="geo.xEnd + 4" :y="l.labelY">{{ l.label.slice(0, 2) }}{{ l.out }}{{ l.v.toFixed(2) }}</text>
+        </g>
+
+        <g v-for="c in geo.candles" :class="['candle', c.up ? 'up' : 'down', { future: c.future }]">
+          <line :x1="c.x" :x2="c.x" :y1="c.hiY" :y2="c.loY" />
+          <rect :x="c.x - geo.bw / 2" :y="c.top" :width="geo.bw" :height="c.h" />
+        </g>
+        <polyline v-if="geo.vwap" class="vwap" :points="geo.vwap" />
+
+        <g v-for="f in geo.fills" :class="['fill-mark', f.buy ? 'buy' : 'sell', { other: !f.own, future: f.future }]">
+          <path :d="f.path"><title>{{ f.title }}</title></path>
+          <text v-if="f.label" class="fill-label" :x="f.lx" :y="f.ly">{{ f.label }}</text>
+        </g>
+
+        <g v-for="v in geo.vols" :class="['vol', v.up ? 'up' : 'down', { future: v.future }]"><rect :x="v.x" :y="v.y" :width="geo.bw" :height="v.h" /></g>
+        <text class="axis" :x="geo.xEnd + 6" :y="volTop + 10">量</text>
+
+        <template v-if="geo.expo">
+          <line class="grid" :x1="geo.x0" :x2="geo.xEnd" :y1="geo.expo.zero" :y2="geo.expo.zero" />
+          <polygon v-for="a in geo.expo.areas" :class="'expo expo-' + a.k" :points="a.points"><title>{{ a.symbol }}</title></polygon>
+          <polyline class="expo-net" :points="geo.expo.net" />
+          <text v-for="t in geo.expo.ticks" class="axis" :x="geo.xEnd + 6" :y="t.y + 4">{{ t.text }}</text>
+        </template>
+        <text v-else class="axis" :x="(geo.x0 + geo.xEnd) / 2" :y="(expTop + expBot) / 2" text-anchor="middle">當天沒有持股</text>
+        <text class="axis" :x="geo.x0 + G + 4" :y="expTop + 10">等效曝險（÷ 權益）</text>
+
+        <line v-if="geo.hoverX !== null" class="crosshair" :x1="geo.hoverX" :x2="geo.hoverX" :y1="priceTop" :y2="expBot" />
+        <line v-if="geo.selX !== null" class="sel-line" :x1="geo.selX" :x2="geo.selX" :y1="0" :y2="expBot" />
+        <text v-if="geo.cutLabel" class="axis" :x="geo.cutLabel.x" :y="priceTop + 12">決策後 →</text>
+
+        <line class="grid" :x1="geo.x0" :x2="geo.xEnd" :y1="laneH - 2" :y2="laneH - 2" />
+        <g v-for="d in geo.decisions" :class="['dmark', d.action, { unfilled: d.unfilled, selected: d.selected }]" @click="emit('select', d.id)">
+          <circle v-if="d.selected" class="halo" :cx="d.cx" :cy="d.cy" r="11" />
+          <path :d="d.path" /><title>{{ d.title }}</title>
+        </g>
+      </svg>
+      <div class="legend">
+        <span>決策：<i class="lg tri buy"></i>買入 <i class="lg tri sell"></i>賣出 <i class="lg diamond"></i>買賣 <i class="lg dot none"></i>不動作（空心：委託未成交）</span>
+        <span>成交：<i class="lg tri buy"></i>買進 <i class="lg tri sell"></i>賣出</span>
+        <span><i class="lg tri other"></i>其他標的（標在 {{ chart.symbol }} 同一時間）</span>
+        <span><i class="lg line vwap"></i>VWAP</span>
+        <span><i class="lg line sl"></i>停損</span><span><i class="lg line tp"></i>停利</span><span><i class="lg line trig"></i>價格觸發帶</span>
+        <span v-for="(s, k) in chart.exposure_symbols"><i :class="'lg box expo-' + k"></i>{{ s.symbol }}{{ s.leverage !== 1 ? '（' + s.leverage + ' 倍）' : '' }}</span>
+      </div>
+    </div>`,
 };
 
 const ReadOnlyNote = {
@@ -447,11 +788,52 @@ const Orders = {
 // ---------------------------------------------------------------- 頁面：決策日誌
 
 const Decisions = {
+  components: { DayChart },
   setup() {
     const date = ref('');
     const kind = ref('');
     const q = ref('');
     const { data, error, load } = useData(() => get('decisions', { date: date.value, kind: kind.value, q: q.value }));
+
+    // 盤勢圖：顯示篩選的日期；沒有篩選日期時顯示最新一筆決策的日期，點選其他日期的決策會切換過去
+    const chart = ref(null);
+    const chartError = ref(null);
+    const chartDate = ref('');
+    const chartSymbol = ref('');
+    const selectedId = ref(null);
+    const chartPanel = ref(null);
+    const loadChart = async () => {
+      if (!chartDate.value) return;
+      try {
+        chart.value = await get('chart/day', { date: chartDate.value, symbol: chartSymbol.value });
+        chartError.value = null;
+      } catch (e) {
+        chart.value = null;
+        chartError.value = e.message;
+      }
+    };
+    watch(data, (rows) => {
+      const d = date.value || rows?.[0]?.ts.slice(0, 10) || today();
+      if (d !== chartDate.value) chartDate.value = d;
+      else loadChart();
+    });
+    watch([chartDate, chartSymbol], loadChart);
+    const shiftDay = (n) => {
+      const d = new Date(`${chartDate.value}T00:00:00Z`);
+      do d.setUTCDate(d.getUTCDate() + n);
+      while (d.getUTCDay() === 0 || d.getUTCDay() === 6);
+      const next = d.toISOString().slice(0, 10);
+      if (next <= today()) chartDate.value = next;
+    };
+    const selectFromChart = (id) => {
+      selectedId.value = selectedId.value === id ? null : id;
+      document.getElementById(`decision-${id}`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    };
+    const showOnChart = (d) => {
+      selectedId.value = d.id;
+      chartDate.value = d.ts.slice(0, 10);
+      chartPanel.value?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    };
     const sessions = reactive({});
     const toggle = async (d) => {
       if (sessions[d.trigger_event_id]) {
@@ -464,7 +846,10 @@ const Decisions = {
         toast(e.message, true);
       }
     };
-    return { data, error, load, date, kind, q, KIND, fmt, sessions, toggle };
+    return {
+      data, error, load, date, kind, q, KIND, DECISION_ACTION, fmt, sessions, toggle,
+      chart, chartError, chartDate, chartSymbol, selectedId, chartPanel, shiftDay, selectFromChart, showOnChart, today,
+    };
   },
   template: `
     <h2>決策日誌</h2>
@@ -478,13 +863,33 @@ const Decisions = {
         <button class="primary" type="submit">篩選</button>
       </form>
     </div>
+    <div class="panel" ref="chartPanel" v-if="chartDate">
+      <div class="chart-head">
+        <h3>盤勢圖</h3>
+        <button class="small" @click="shiftDay(-1)">‹ 前一天</button>
+        <strong class="mono">{{ chartDate }}</strong>
+        <button class="small" @click="shiftDay(1)" :disabled="chartDate >= today()">後一天 ›</button>
+        <label class="field inline-field">基準標的
+          <select :value="chartSymbol || chart?.symbol" @change="chartSymbol = $event.target.value">
+            <option v-for="s in chart?.symbols ?? []" :value="s.symbol">{{ s.symbol }} {{ s.name }}</option>
+          </select>
+        </label>
+        <span class="spacer"></span>
+        <span class="muted" v-if="chart?.bars_source === 'cache'">K 線來自快取</span>
+      </div>
+      <div v-if="chartError" class="notice bad">{{ chartError }}</div>
+      <div v-if="chart?.bars_error" class="notice warn">取不到 K 線（{{ chart.bars_error }}），只顯示當天的決策與成交。</div>
+      <DayChart v-if="chart" :chart="chart" :selected-id="selectedId" @select="selectFromChart" />
+      <div class="muted small-note">點選上方的決策點可對應到下方的決策；選取後，之後的 K 棒會淡化。等效曝險為市值 × 槓桿倍數 ÷ 權益，槓桿與反向 ETF 每日重新平衡，只是近似值。</div>
+    </div>
     <div v-if="error" class="notice bad">{{ error }}</div>
     <div class="panel" v-if="data">
       <div v-if="!data.length" class="empty">沒有符合的決策記錄</div>
-      <div v-for="d in data" :key="d.id" class="decision">
+      <div v-for="d in data" :key="d.id" class="decision" :id="'decision-' + d.id" :class="{ selected: selectedId === d.id }">
         <div class="head">
           <strong>{{ fmt.time(d.ts) }}</strong>
           <span class="tag">{{ KIND[d.kind] ?? d.kind ?? '手動' }}</span>
+          <span v-if="d.action" :class="['tag', 'act-' + d.action]">{{ DECISION_ACTION[d.action] }}{{ d.action !== 'none' && !d.filled ? '（未成交）' : '' }}</span>
           <span class="muted" v-if="d.trigger_detail?.reason">{{ d.trigger_detail.reason }}</span>
           <span class="spacer"></span>
           <span class="muted mono" v-if="d.strategy_version">策略 {{ d.strategy_version.slice(0, 7) }}</span>
@@ -493,6 +898,7 @@ const Decisions = {
         <div><strong>動作：</strong>{{ d.actions }}</div>
         <div class="pre">{{ d.reasoning }}</div>
         <div class="muted" v-if="d.next_trigger">下一輪觸發：定時 {{ d.next_trigger.interval_min ?? '關' }} 分、漲 {{ d.next_trigger.up_pct ?? '關' }}%、跌 {{ d.next_trigger.down_pct ?? '關' }}%</div>
+        <button class="small" @click="showOnChart(d)">在盤勢圖標示</button>
         <button v-if="d.has_log" class="small" @click="toggle(d)">{{ sessions[d.trigger_event_id] ? '收起完整過程' : '查看完整過程' }}</button>
         <div class="steps" v-if="sessions[d.trigger_event_id]">
           <div v-for="(s, i) in sessions[d.trigger_event_id]" :key="i" class="step pre" :class="s.type">{{ s.text }}</div>
