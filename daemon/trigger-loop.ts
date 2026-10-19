@@ -2,6 +2,7 @@ import { join } from 'node:path';
 import type { Config } from '../core/config.js';
 import type { DB } from '../core/db.js';
 import type { QuoteSource } from '../core/market.js';
+import { contextReport, contextSummary, refreshMin } from '../core/market-context.js';
 import { buildStatus } from '../core/status.js';
 import { type StrategyCheck, currentStrategy } from '../core/strategy.js';
 import { getPause, getState, recordRiskEvent, setState } from '../core/state.js';
@@ -161,6 +162,7 @@ export class TriggerLoop {
       now: toTwIso(now),
       status: buildStatus(db, config, clock, quotes),
       notes: this.notesFor(t, mismatch),
+      globalSummary: contextSummary(contextReport(db, clock, refreshMin(config))),
     });
     const env: Record<string, string> = {
       ...this.o.env,

@@ -62,6 +62,7 @@ description: 交易工作階段操作系統的方法：ctrade 各指令的用途
 | `ctrade fees` | 費率、稅率與市場規則，用來估算交易成本 |
 | `ctrade indicators <代號> [--sma 20,60]` | 技術指標，見下方「技術指標」；策略要求的數值一律從這裡取，不要自己從 K 線手算 |
 | `ctrade indicators --list` | 所有指標欄位的定義與單位（不需要 daemon） |
+| `ctrade global` | 隔夜國際行情：美股指數與台積電 ADR、台指期夜盤、美元兌新台幣，見下方「隔夜國際行情」（不需要 daemon） |
 | `ctrade history --days 20` | 每日快照 |
 | `ctrade trigger show` | 目前觸發條件與允許範圍 |
 | `ctrade stop show` | 硬停損停利價 |
@@ -86,6 +87,28 @@ description: 交易工作階段操作系統的方法：ctrade 各指令的用途
 | `intraday.today_lots`、`avg20_daily_lots`、`today_vs_avg20` | 今天已收完 5 分 K 的量、近 20 個交易日每日平均量（皆為張）、兩者比值 |
 
 開盤前或非交易日，`intraday` 的欄位為 null。均線週期預設 20、60；策略要其他週期時加 `--sma`，例如 `--sma 20,60,120`。
+
+### 隔夜國際行情（`ctrade global`）
+
+daemon 在交易日每 15 分鐘從公開來源抓一次，存在帳本資料庫，查詢時不連外。`pre_open` 的提示也會附上摘要。
+
+| 欄位 | 內容 | 來源 |
+| --- | --- | --- |
+| `us_markets.data.quotes[]` | S&P 500、那斯達克、費城半導體、台積電 ADR 最近一個交易日的 `close`、`prev_close`、`change_pct`；`date` 是美東交易日，`in_progress` 為 true 代表美股還在交易、`close` 是盤中價 | Yahoo Finance |
+| `taifex_night.data` | 台指期近月合約的夜盤（15:00 至隔天 05:00）：`last` 最後成交價、`ref` 前一個日盤收盤、`change_pct` 相對日盤收盤的漲跌、`spot_ref` 加權指數前一日收盤、`last_trade_at` 最後成交時間 | 臺灣期貨交易所 |
+| `usdtwd.data` | 美元兌新台幣：`last`、`prev_close`、`change_pct`、`quoted_at`。數字上升代表新台幣貶值 | Yahoo Finance 國際報價（不是台北外匯經紀的收盤價） |
+
+每一項都有 `status`：
+
+- `ok`：資料可用。
+- `stale`：有資料但過期，原因寫在 `stale_reason`。資料時間超過 120 小時，或超過兩倍更新間隔沒有成功抓取，都算過期。
+- `missing`：從來沒有抓到資料。
+
+`fetch_error` 是最近一次抓取失敗的訊息，成功後會清除。
+
+- 這些是**參考資料**，策略沒有寫到的用法，不要自行當成進出場條件。
+- 過期或缺漏時照常依策略決策，並在決策記錄中註明。
+- `data_time` 是資料本身的時間，`fetched_at` 是 daemon 最後一次抓到的時間。判斷新舊看 `data_time`。
 
 ### 下單與刪單
 

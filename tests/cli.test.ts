@@ -51,6 +51,16 @@ describe('CLI', () => {
     expect(r.json?.data).toEqual({ cash: 0, reserved: 0, available: 0 });
   });
 
+  it('global：沒有資料時三項都標示 missing，不需要 daemon', () => {
+    const r = cli('ctrade', ['global']);
+    expect(r.code).toBe(0);
+    expect(r.json?.data).toMatchObject({
+      us_markets: { label: '美股', status: 'missing' },
+      taifex_night: { label: '台指期夜盤', status: 'missing' },
+      usdtwd: { label: '美元兌新台幣', status: 'missing' },
+    });
+  });
+
   it('--text 輸出以 [PAPER] 開頭', () => {
     const r = cli('ctrade', ['balance', '--text']);
     expect(r.code).toBe(0);

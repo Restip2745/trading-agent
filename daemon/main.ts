@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { loadConfig, projectRoot } from '../core/config.js';
 import { openDb } from '../core/db.js';
 import { ipcPath } from '../core/ipc.js';
+import { refreshMin } from '../core/market-context.js';
 import { isSimulationUrl, keyringStore, requireCredentials, resolveMarketCredentials } from '../core/secrets.js';
 import { checkStrategyFiles, currentStrategy } from '../core/strategy.js';
 import { systemClock, toTwIso } from '../core/time.js';
@@ -23,6 +24,7 @@ import { EsunBroker } from './esun/broker.js';
 import { EsunMarketFeed } from './esun/feed.js';
 import { type MarketFeed, NullFeed, ReplayFeed } from './feeds.js';
 import { acquireLock } from './lock.js';
+import { MarketContextJobs } from './market-context.js';
 import { claudeAuthStatus } from './claude.js';
 import { Daemon } from './service.js';
 
@@ -32,9 +34,10 @@ const program = new Command('ctrade-daemon')
   .option('--keep-timestamps', '重播時保留原始事件時間（預設改寫為當下時間）')
   .option('--no-claude', '不叫醒 Claude，只提供行情、送單、停損與每日工作')
   .option('--no-market', '不接玉山行情')
+  .option('--no-context', '不抓取盤外資訊（美股、台指期夜盤、匯率）')
   .parse();
 
-const opts = program.opts<{ replay?: string; speed: string; keepTimestamps?: boolean; claude: boolean; market: boolean }>();
+const opts = program.opts<{ replay?: string; speed: string; keepTimestamps?: boolean; claude: boolean; market: boolean; context: boolean }>();
 const log = (msg: string) => console.log(`${toTwIso(systemClock.now())} ${msg}`);
 
 /** Claude 以 Bash(ctrade *) 呼叫 CLI，ctrade 必須在 PATH 上（npm run build && npm link）。 */
@@ -87,6 +90,11 @@ async function main(): Promise<void> {
     if (!check.ok) console.warn(`${check.reason}。修正前不會叫醒 Claude 做交易決策`);
   }
 
+  const marketContext =
+    opts.context && config.market_context?.enabled !== false
+      ? new MarketContextJobs(db, systemClock, { refreshMin: refreshMin(config), fetch: globalThis.fetch, log })
+      : undefined;
+
   const daemon = new Daemon({
     config,
     db,
@@ -95,6 +103,7 @@ async function main(): Promise<void> {
     feed,
     ipcPath: ipcPath(root, config.mode),
     broker,
+    marketContext,
     claude: opts.claude ? undefined : false,
     strategyCheck: (version) => checkStrategyFiles(root, version),
     log,

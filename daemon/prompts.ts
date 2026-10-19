@@ -5,12 +5,12 @@ import type { DueTrigger } from './scheduler.js';
 
 /**
  * 依觸發類型讀取 prompts/<kind>.md，填入觸發原因與狀態摘要（規格第 9 節）。
- * 範本中的佔位符：{{mode}} {{now}} {{trigger_reason}} {{status_json}} {{notes}}
+ * 範本中的佔位符：{{mode}} {{now}} {{trigger_reason}} {{status_json}} {{notes}} {{global_summary}}
  */
 export function renderPrompt(
   root: string,
   trigger: DueTrigger,
-  ctx: { mode: string; now: string; status: StatusSummary; notes: string[] },
+  ctx: { mode: string; now: string; status: StatusSummary; notes: string[]; globalSummary?: string },
 ): string {
   const path = join(root, 'prompts', `${trigger.kind}.md`);
   const fallback = join(root, 'prompts', 'interval.md');
@@ -25,6 +25,7 @@ export function renderPrompt(
     trigger_reason: trigger.reason,
     status_json: JSON.stringify(ctx.status, null, 2),
     notes: notes.length > 0 ? notes.map((n) => `- ${n}`).join('\n') : '- 無',
+    global_summary: ctx.globalSummary ?? '- 無資料',
   };
   return template.replace(/\{\{(\w+)\}\}/g, (m, key: string) => values[key] ?? m);
 }

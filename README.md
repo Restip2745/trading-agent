@@ -2,7 +2,7 @@
 
 讓 Claude 透過玉山證券 API，在使用者撥給它的一筆**獨立資金**內自動交易台股。Claude 的資金與持倉全部記錄在本地 SQLite 影子帳本，與使用者其餘資產完全分開；所有元件都在使用者自己的電腦上執行，憑證不離開本機。
 
-> **專案狀態：第 1 至 5 階段程式完成。** 帳本核心、模擬撮合、daemon 與 IPC、觸發排程、硬停損停利、叫醒 Claude、玉山行情與券商轉接層、第一版策略（0050 波段核心＋衛星）、Web UI、技術指標工具（`ctrade indicators`）都已完成，219 個自動化測試通過。待完成：paper 模式實際跑一個交易日的第 4 階段驗收、第 6 階段的復盤提案審核流程。券商 API 查證結果見 [`doc/broker-api-notes.md`](doc/broker-api-notes.md)。
+> **專案狀態：第 1 至 5 階段程式完成。** 帳本核心、模擬撮合、daemon 與 IPC、觸發排程、硬停損停利、叫醒 Claude、玉山行情與券商轉接層、第一版策略（0050 波段核心＋衛星）、Web UI、技術指標工具（`ctrade indicators`）都已完成，231 個自動化測試通過。待完成：paper 模式實際跑一個交易日的第 4 階段驗收、第 6 階段的復盤提案審核流程。券商 API 查證結果見 [`doc/broker-api-notes.md`](doc/broker-api-notes.md)。
 >
 > 目前的 `trading-strategy` skill 是**佔位版 v0：不開新倉**，只維護既有持倉的停損。第一版策略要依規格第 15 節撰寫後才會開始交易。
 >
@@ -200,7 +200,7 @@ trading-agent/
 | 類別 | 指令 |
 | --- | --- |
 | 狀態與帳本 | `status`、`balance`、`positions`、`history`、`fees` |
-| 行情與資訊 | `quote`、`candles`、`indicators`（技術指標，`--list` 列出欄位）、`market`、`futures`、`flows`、`global`、`news` |
+| 行情與資訊 | `quote`、`candles`、`indicators`（技術指標，`--list` 列出欄位）、`global`（隔夜美股、台指期夜盤、美元兌新台幣）；`market`、`flows`、`news` 待做 |
 | 交易（限價單，不提供改單） | `order buy`、`order sell`、`order cancel`、`orders`、`fills` |
 | 持倉保護 | `stop show`、`stop set`（停損價只能上調） |
 | 觸發與記錄 | `trigger show`、`trigger set`、`journal add` |
@@ -262,7 +262,7 @@ ctrade order buy 0050 --qty 100 --price 55.20 --session odd_intraday
 
 | 時間 | 觸發類型 | 目的 |
 | --- | --- | --- |
-| 08:45 | `pre_open` | 盤前準備，附上夜盤、美股、法人摘要 |
+| 08:45 | `pre_open` | 盤前準備，附上美股、台指期夜盤、美元兌新台幣摘要（法人待做） |
 | 09:01 | `open` | 開盤後第一次決策 |
 | 盤中 | `interval` / `price_move` | 定時（預設每 5 分鐘）或價格漲跌超過門檻（預設 +3% / −2%） |
 | 13:20 | `pre_close` | 收盤集合競價前的決策 |
@@ -336,7 +336,7 @@ npm run web
 
 - [ ] **1. 確認券商 API**：查證規格第 20 節的待確認事項，寫出 `doc/broker-api-notes.md`，唯讀查詢實際呼叫成功。（筆記已完成；實際呼叫需先下載 Node.js SDK 並設定金鑰）
 - [x] **2. 帳本核心**：schema、migration、推導 view、`ctrade-admin` 資金與持股操作、風控函式庫，單元測試全數通過。
-- [ ] **3. 行情與模擬撮合**：行情接入、模擬撮合引擎、`ctrade` 全部指令，以錄製行情重播驗證。（模擬撮合、daemon IPC、下單與刪單、玉山行情與券商轉接層已完成；待以真實金鑰驗證、在玉山模擬環境驗證下單與刪單；`market`／`news` 等盤外資訊指令待做）
+- [ ] **3. 行情與模擬撮合**：行情接入、模擬撮合引擎、`ctrade` 全部指令，以錄製行情重播驗證。（模擬撮合、daemon IPC、下單與刪單、玉山行情與券商轉接層已完成；待以真實金鑰驗證、在玉山模擬環境驗證下單與刪單；`global`（美股、台指期夜盤、匯率）已完成，`market`／`flows`／`news` 等盤外資訊指令待做）
 - [ ] **4. Daemon 與 Claude Code 整合**：觸發、硬停損停利、兩個 skill、提示範本、權限設定，paper 模式完整跑一個交易日。（程式與測試已完成；驗收需要真實行情與第一版策略，在 paper 模式實際跑一個交易日）
 - [x] **5. Web UI**：所有頁面與操作。（已從 Web UI 撥入資金、轉入持股、暫停與恢復，帳本流水正確反映）
 - [ ] **6. 復盤流程與模擬運行**：連續 10 個交易日無對帳錯誤，至少完成一次策略提案審核。

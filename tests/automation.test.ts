@@ -85,6 +85,8 @@ describe('叫醒 Claude', () => {
     expect(inv.prompt.startsWith('[TRADING SESSION] 模式：PAPER')).toBe(true);
     expect(inv.prompt).toContain('固定觸發 pre_open');
     expect(inv.prompt).toContain('"equity": 100000');
+    // 還沒抓到盤外資訊時明確標示缺漏
+    expect(inv.prompt).toContain('- 美股：資料缺漏（daemon 尚未抓到資料）');
     expect(inv.profile).toBe('trading');
     expect(inv.model).toBe(env.config.model.intraday);
     expect(inv.env).toMatchObject({ CTRADE_TRIGGER_EVENT_ID: String(inv.triggerEventId), CTRADE_IPC_PATH: 'test-pipe' });

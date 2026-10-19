@@ -11,6 +11,7 @@ import type { Session } from '../core/config.js';
 import { CtradeError, ExitCode, invalidArgs } from '../core/errors.js';
 import { call } from '../core/ipc.js';
 import { getBalance, getPositions } from '../core/ledger.js';
+import { contextReport, refreshMin } from '../core/market-context.js';
 import type { QuoteDetail } from '../core/marketdata.js';
 import { type OrderRow, createOrder, listFills, listOrders, markRejected, requestCancelByClaude } from '../core/orders.js';
 import { getFeeSchedule, getMarketRules, getRiskParams } from '../core/settings.js';
@@ -144,6 +145,16 @@ program
         interval: opts.interval,
         count: parseIntArg('--count', opts.count),
       });
+    }),
+  );
+
+program
+  .command('global')
+  .description('隔夜國際行情：美股指數與台積電 ADR、台指期夜盤、美元兌新台幣（daemon 定時抓取，標示資料時間、來源與是否過期）')
+  .action(() =>
+    run(() => {
+      const { db, config, clock } = getCtx();
+      return { now: toTwIso(clock.now()), ...contextReport(db, clock, refreshMin(config)) };
     }),
   );
 

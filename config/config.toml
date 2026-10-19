@@ -90,6 +90,10 @@ open = "09:01"
 pre_close = "13:20"
 review = "14:35"
 
+[market_context]                  # 盤外資訊（規格第 14 節）：美股、台指期夜盤、美元兌新台幣
+enabled = true                    # daemon 是否抓取；關閉後 ctrade global 只顯示舊資料
+refresh_min = 15                  # 交易日每隔幾分鐘抓一次，超過兩倍間隔沒有成功更新會標示過期
+
 [paper]                           # 模擬撮合（規格第 7 節）
 fill_at_touch = false
 max_volume_share_pct = 20

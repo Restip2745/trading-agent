@@ -17,6 +17,7 @@ import { type ClaudeInvoker, ClaudeCliInvoker } from './claude.js';
 import { cancelAll, flatten } from './emergency.js';
 import { DailyJobs } from './daily.js';
 import type { MarketFeed } from './feeds.js';
+import type { MarketContextJobs } from './market-context.js';
 import { TriggerScheduler } from './scheduler.js';
 import { StopExecutor } from './stops.js';
 import { TriggerLoop } from './trigger-loop.js';
@@ -35,6 +36,8 @@ export interface DaemonOptions {
   claude?: ClaudeInvoker | false;
   /** 叫醒 Claude 前比對策略檔與生效版本；daemon/main.ts 以 git 實作，不指定時不檢查（測試用）。 */
   strategyCheck?: (version: string | null) => StrategyCheck;
+  /** 盤外資訊的抓取（daemon/main.ts 依設定建立），不指定時不抓取（測試與離線使用）。 */
+  marketContext?: MarketContextJobs;
   /** 維護工作（心跳、到期、清理、觸發）的間隔，測試時可設為 0 停用、改為手動呼叫 tick()。 */
   tickMs?: number;
   log?: (msg: string) => void;
@@ -195,6 +198,8 @@ export class Daemon {
       this.log(`維護工作錯誤：${(err as Error).message}`);
     }
     await this.runStops();
+    // 盤外資訊的抓取不等待：外部服務慢或失敗時不能拖住停損與觸發
+    this.opts.marketContext?.maybeRefresh().catch((err) => this.log(`盤外資訊抓取錯誤：${(err as Error).message}`));
     if (this.triggers) {
       this.triggers.tick().catch((err) => this.log(`觸發處理錯誤：${(err as Error).message}`));
     } else {

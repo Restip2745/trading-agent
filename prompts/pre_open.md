@@ -14,6 +14,12 @@
 
 {{notes}}
 
+## 隔夜國際行情（ctrade global 摘要）
+
+以下是 daemon 抓取的數據，只是參考資料。策略沒有寫到的用法，不要自行當成進出場條件。完整欄位用 `ctrade global` 查詢。
+
+{{global_summary}}
+
 ## 目前狀態（ctrade status 摘要）
 
 ```json

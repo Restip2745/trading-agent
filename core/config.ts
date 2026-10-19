@@ -72,6 +72,8 @@ export interface Config {
   stops: { order_ticks: number; resend_interval_sec: number };
   web?: { port: number };
   usage: { daily_budget_tokens: number; weekly_budget_tokens: number };
+  /** 盤外資訊（規格第 14 節）：美股、台指期夜盤、匯率的抓取 */
+  market_context?: { enabled: boolean; refresh_min: number };
 }
 
 /**
